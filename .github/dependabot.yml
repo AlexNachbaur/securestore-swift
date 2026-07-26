@@ -5,7 +5,18 @@
 
 version: 2
 updates:
+  # Kept for the day a dependency is genuinely warranted, but expect it to stay quiet: this
+  # package has NO dependencies by policy — it sits in credential paths on several platforms, so
+  # anything added is a deliberate decision (see CLAUDE.md).
   - package-ecosystem: "swift"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # This is the ecosystem that actually drifts. The workflow pins actions/checkout,
+  # actions/cache, and skiptools/swift-android-action — and the Android job in particular depends
+  # on a third-party action that tracks the Swift SDK for Android, so staying current matters.
+  - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
