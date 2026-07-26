@@ -47,6 +47,12 @@ jobs:
   android:
     name: Build & Test (Android)
     runs-on: ubuntu-latest
+    # Gated behind lint + macOS rather than run in parallel. The Android job boots an emulator and
+    # is the slowest thing here, so spending it on a commit that already failed a cheaper, faster
+    # check is waste. Both suites assert the same contract, so an Apple failure almost always means
+    # Android would fail too — running them concurrently just pays twice for one bug. Costs some
+    # wall-clock on a passing run; saves the emulator run on every failing one.
+    needs: [lint, macos]
     steps:
       - uses: actions/checkout@v6
 
