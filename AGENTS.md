@@ -6,7 +6,7 @@ Instructions for AI agents working in the securestore-swift repository itself. I
 
 ## What this package is
 
-A cross-platform secure-credential store: one `SecureStore` protocol, a Keychain Services backend
+A cross-platform secure-credential store: one `SecureStore` protocol (set, read, remove, removeAll, `keys(withPrefix:)`), a Keychain Services backend
 for Apple, and a host-registered C-bridge backend for platforms without a Swift-native secure
 store (Android). Swift 6.3+, one library target, no dependencies.
 
@@ -30,6 +30,9 @@ passes.
    `context` pointer. This is what makes them safe from JNI.
 6. **The C ABI is a compatibility surface.** Additive callbacks are fine; changing an existing
    signature breaks every host compiled against it and is a semver-major change.
+7. **Never `try?` or `try!`.** Not in production, not in tests, not in `defer`. It discards the
+   error, which is the failure-swallowing this package exists to prevent. `defer` cannot throw, so
+   cleanup records a test issue instead of discarding — see `cleanUp` in the contract suite.
 
 ## Where behaviour is tested
 

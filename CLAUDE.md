@@ -10,7 +10,7 @@
 
 ## Project Summary
 
-One secure-credential API for Swift across Apple platforms and Android. A single `SecureStore` protocol covers the six operations a token store actually needs; Apple platforms are served by Keychain Services directly, and platforms whose secure store lives outside Swift (Android's Keystore, reached via Java) are served by a backend the host registers through a small C entry point. Callers never learn which platform they are on. Built to let shared Swift business logic — the kind that compiles for both iOS and Android — persist credentials without dragging a Java-interop layer into it.
+One secure-credential API for Swift across Apple platforms and Android. A single `SecureStore` protocol covers the operations a token store actually needs — set, read, remove, removeAll, and prefix-scoped key enumeration; Apple platforms are served by Keychain Services directly, and platforms whose secure store lives outside Swift (Android's Keystore, reached via Java) are served by a backend the host registers through a small C entry point. Callers never learn which platform they are on. Built to let shared Swift business logic — the kind that compiles for both iOS and Android — persist credentials without dragging a Java-interop layer into it.
 
 ## Design Principles
 
@@ -52,6 +52,12 @@ These decisions were made with the project owner and are settled:
 - 4-space indentation
 - swift-format enforced (see `.swift-format`)
 - No force unwraps in production code
+- **NEVER use `try?` or `try!`. Ever.** Not in production code, not in tests, not in `defer`
+  blocks, not in throwaway cleanup. `try?` silently discards the error, which is the exact
+  failure-swallowing this package exists to prevent — and writing it here would contradict the
+  premise that "absent" and "unreadable" are different. Use `do { try … } catch { … }`, or mark the
+  function `throws` and propagate. `defer` cannot throw, so cleanup goes through a helper that
+  records the failure (see `cleanUp` in the contract suite) rather than discarding it.
 - No `DispatchQueue` — use Swift concurrency
 - Prefer value types over reference types
 - Documentation comments on all public API, explaining *why* where the reason is non-obvious
