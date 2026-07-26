@@ -34,6 +34,11 @@ Initial release.
 
 ### Fixed
 
+- `HostSecureStore.data(for:)` returned `nil` for a stored-but-empty value, making it
+  indistinguishable from a missing one — the exact conflation this package exists to prevent. The
+  data sink now treats a zero-length callback as an empty value, since the sink is only invoked
+  for an item that exists. Caught by the contract suite running in an Android emulator, not on
+  Apple, where the Keychain backend already behaved correctly.
 - `removeAll()` deleted only a single item on the macOS legacy keychain. `SecItemDelete` removes
   every matching item on iOS but exactly one on macOS; the implementation now loops until the
   store reports nothing left. Caught by the shared contract suite on its first run.

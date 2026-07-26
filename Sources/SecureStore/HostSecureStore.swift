@@ -206,9 +206,19 @@
                 key.withCString { key in
                     withUnsafeMutablePointer(to: &captured) { context in
                         host.get(service, namespace, key, UnsafeMutableRawPointer(context)) { context, bytes, length in
-                            guard let context, let bytes, length > 0 else { return }
-                            context.assumingMemoryBound(to: Data?.self).pointee =
-                                Data(bytes: bytes, count: Int(length))
+                            guard let context else { return }
+                            let target = context.assumingMemoryBound(to: Data?.self)
+                            // The sink is only invoked for an item that EXISTS — a missing item
+                            // is reported by the status code, never by calling back. So a
+                            // zero-length call means "stored, and empty", which must produce an
+                            // empty `Data` rather than leaving `nil` behind and masquerading as
+                            // missing. (An earlier `length > 0` guard did exactly that; the
+                            // Android emulator run caught it.)
+                            guard let bytes, length > 0 else {
+                                target.pointee = Data()
+                                return
+                            }
+                            target.pointee = Data(bytes: bytes, count: Int(length))
                         }
                     }
                 }
