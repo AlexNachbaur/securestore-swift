@@ -1,0 +1,48 @@
+name: Bug report
+description: Something in SecureStore isn't behaving as documented
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug! A minimal reproduction makes fixes much faster.
+
+        ⚠️ For security issues, please do **not** file a public issue — see [SECURITY.md](../blob/main/SECURITY.md).
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened, and what did you expect to happen instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: >
+        The smallest store configuration and sequence of calls that reproduces the problem.
+        Include the platform and, on a host-registered backend, how the host was registered.
+      render: swift
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual response / output
+      description: The response, error, or crash you observed (include logs where relevant).
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: SecureStore version
+      placeholder: e.g. 0.1.0, or a commit SHA if building from main
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: e.g. Swift 6.1, macOS 15.5 / Xcode 16.4, iOS 18.5 simulator — or Ubuntu 24.04, Windows 11, Android
+    validations:
+      required: true

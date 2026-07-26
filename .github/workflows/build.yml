@@ -1,0 +1,90 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# swift-tools-version is 6.3, so every runner must provide Swift 6.3 or newer — an older
+# toolchain cannot even parse the manifest. That means macos-26 (Xcode 26.x) rather than
+# macos-15/Xcode 16.4, and the swift:6.3 container rather than swift:6.1.
+jobs:
+  macos:
+    name: Build & Test (macOS)
+    runs-on: macos-26
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v6
+
+      # The package has no dependencies, so there is nothing to fetch — this caches the
+      # compiled build products, which is where the time actually goes on a small package.
+      - name: Cache SwiftPM
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/org.swift.swiftpm
+            .build
+          key: ${{ runner.os }}-spm-${{ hashFiles('Package.swift', 'Sources/**', 'Tests/**') }}
+          restore-keys: |
+            ${{ runner.os }}-spm-
+
+      - name: Show toolchain
+        run: swift --version
+
+      - name: Build
+        run: swift build
+
+      # Exercises KeychainSecureStore against the real Keychain, not a stub.
+      - name: Test
+        run: swift test
+
+  android:
+    name: Build & Test (Android)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      # Runs the same contract suite in an emulator, so the host path — the C ABI, its sink
+      # callbacks, and the status codes — is executed rather than merely compiled. The action
+      # manages its own toolchain/SDK/NDK caching.
+      - name: Build and test on Android emulator
+        uses: skiptools/swift-android-action@v2
+        with:
+          swift-version: '6.3.3'
+          android-api-level: 28
+          free-disk-space: true
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    container: swift:6.3
+    steps:
+      - uses: actions/checkout@v6
+      - name: swift-format
+        run: swift format lint --strict --recursive Sources Tests Package.swift
+
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    container: swift:6.3
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Cache SwiftPM
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/org.swift.swiftpm
+            .build
+          key: ${{ runner.os }}-docs-${{ hashFiles('Package.swift', 'Sources/**') }}
+          restore-keys: |
+            ${{ runner.os }}-docs-
+
+      - name: Build DocC documentation
+        run: swift package generate-documentation --target SecureStore --analyze

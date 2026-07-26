@@ -1,0 +1,39 @@
+# Changelog
+
+All notable changes to SecureStore will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.1.0] - 2026-07-26
+
+Initial release.
+
+### Added
+
+- **`SecureStore` protocol** — six operations over the OS secure store: `set(_:for:)`,
+  `data(for:)`, `remove(_:)`, `removeAll()`, `allKeys()`. Every operation throws, including reads,
+  so a locked or unreadable item is never silently indistinguishable from an absent one.
+- **`KeychainSecureStore`** — Apple backend over Keychain Services, using
+  `kSecClassGenericPassword` keyed by service + account, with
+  `kSecAttrAccessibleAfterFirstUnlock` so credentials stay readable to background and extension
+  processes on a locked device.
+- **`HostSecureStore`** — backend for platforms with no Swift-native secure store (Android's
+  Keystore). The host registers C callbacks through `securestore_register_host`; Swift forwards
+  to them and never links a Java SDK. See
+  [docs/design/host-bridge-abi.md](docs/design/host-bridge-abi.md).
+- **`SecureStoreConfiguration`** with an opaque `namespace` rather than an `accessGroup`. On Apple
+  it maps to a keychain access group; hosts without an equivalent ignore it. Naming it after the
+  Apple concept would have baked one platform's model into a cross-platform API.
+- **Backend-agnostic contract suite** — the behavioural contract is written once and run against
+  whichever backend the platform provides, so Apple and Android cannot drift. On non-Apple
+  platforms it registers an in-memory host through the real C entry point, exercising the ABI
+  itself rather than a Swift stand-in.
+
+### Fixed
+
+- `removeAll()` deleted only a single item on the macOS legacy keychain. `SecItemDelete` removes
+  every matching item on iOS but exactly one on macOS; the implementation now loops until the
+  store reports nothing left. Caught by the shared contract suite on its first run.

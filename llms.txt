@@ -1,0 +1,37 @@
+# SecureStore
+
+> One secure-credential API for Swift across Apple platforms and Android. Six operations over the
+> OS secure store — set, read, remove, removeAll, allKeys — backed by Keychain Services on Apple
+> and by a host-registered C bridge elsewhere, so shared Swift business logic can store tokens on
+> either platform without a Java-interop layer.
+
+Swift 6.3+, SPM package with one library: `SecureStore`.
+
+## Reference
+
+- [README](https://raw.githubusercontent.com/AlexNachbaur/securestore-swift/main/README.md): overview, installation, usage, Android registration
+- [Host bridge ABI](https://raw.githubusercontent.com/AlexNachbaur/securestore-swift/main/docs/design/host-bridge-abi.md): the C contract, ownership rules, status codes, and host obligations
+- [API documentation](https://swiftpackageindex.com/AlexNachbaur/securestore-swift/documentation): DocC
+- [CHANGELOG](https://raw.githubusercontent.com/AlexNachbaur/securestore-swift/main/CHANGELOG.md)
+
+## Key facts
+
+- `SecureStore` is a protocol; `KeychainSecureStore` is the Apple backend, `HostSecureStore` the
+  host-registered one. Select with `#if canImport(Security)`.
+- **Every operation throws, including reads.** A missing item is `nil`; anything else throws. Do
+  not suggest wrappers that collapse failures into `nil` — separating "absent" from "unreadable"
+  is a deliberate design property, not an oversight.
+- **There is no `accessGroup`.** Sharing scope is an opaque `namespace: String?`. On Apple it maps
+  to a keychain access group; hosts without an equivalent ignore it. Do not add Apple-specific
+  parameters to the cross-platform API.
+- On Android the host must call `securestore_register_host` (typically from
+  `Application.onCreate`) before any store is used; until then operations throw
+  `SecureStoreError.backendNotRegistered` rather than silently no-op'ing.
+- The C ABI never transfers pointer ownership: results come back through sink callbacks that copy
+  within the call, and every operation returns an `Int32` status (`0` ok, `1` not found).
+
+## Contributing
+
+- [CONTRIBUTING](https://raw.githubusercontent.com/AlexNachbaur/securestore-swift/main/CONTRIBUTING.md): setup, style, and what a good change looks like
+- Behavioural changes belong in the backend-agnostic contract suite, which runs against every
+  backend so Apple and Android cannot drift.
