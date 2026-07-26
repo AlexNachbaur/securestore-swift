@@ -41,13 +41,18 @@ Initial release.
   platforms it registers an in-memory host through the real C entry point, exercising the ABI
   itself rather than a Swift stand-in.
 
-### Fixed
+### Platform behaviour worth knowing
 
-- `HostSecureStore.data(for:)` returned `nil` for a stored-but-empty value, making it
-  indistinguishable from a missing one — the exact conflation this package exists to prevent. The
-  data sink now treats a zero-length callback as an empty value, since the sink is only invoked
-  for an item that exists. Caught by the contract suite running in an Android emulator, not on
-  Apple, where the Keychain backend already behaved correctly.
-- `removeAll()` deleted only a single item on the macOS legacy keychain. `SecItemDelete` removes
-  every matching item on iOS but exactly one on macOS; the implementation now loops until the
-  store reports nothing left. Caught by the shared contract suite on its first run.
+Two divergences the implementation accounts for, both found by the contract suite during
+development rather than by reading documentation. Recorded here because anyone writing a backend —
+or debugging one — will otherwise trip over them.
+
+- **`SecItemDelete` is not uniform across Apple platforms.** A query matching several items deletes
+  all of them on iOS, but exactly one on the macOS legacy keychain. `removeAll()` therefore loops
+  until the store reports nothing left instead of assuming the iOS semantics.
+- **A zero-length value is a value.** The host bridge's data sink is invoked only for an item that
+  exists — a missing item is reported by the status code and never calls back — so a zero-length
+  callback means "stored, and empty" and yields an empty `Data`, not `nil`. Treating it as `nil`
+  would make an empty credential indistinguishable from an absent one, which is exactly what this
+  package refuses to do. Caught by the Android emulator run; the Apple backend was already correct,
+  so no amount of Apple-side testing would have surfaced it.
