@@ -13,9 +13,18 @@ Initial release.
 
 ### Added
 
-- **`SecureStore` protocol** — six operations over the OS secure store: `set(_:for:)`,
-  `data(for:)`, `remove(_:)`, `removeAll()`, `allKeys()`. Every operation throws, including reads,
-  so a locked or unreadable item is never silently indistinguishable from an absent one.
+- **`SecureStore` protocol** — five required operations over the OS secure store: `set(_:for:)`,
+  `data(for:)`, `remove(_:)`, `removeAll()`, `keys(withPrefix:)`, with `allKeys()` provided as an
+  extension over the last. Every operation throws, including reads, so a locked or unreadable item
+  is never silently indistinguishable from an absent one.
+- **Prefix enumeration** — `keys(withPrefix:)` makes one-item-per-credential practical: store
+  `"session.<accountID>"` per account and enumerate with `keys(withPrefix: "session.")` instead of
+  packing every account into a single blob. Prefix is the primitive because it is what the
+  platforms actually offer — Windows Credential Manager's `CredEnumerateW` filter is documented as
+  "a name prefix followed by an asterisk" and supports nothing richer, so anything more expressive
+  would have to be emulated everywhere. Apple filters in-process (Keychain Services has no prefix
+  predicate for generic-password accounts); hosts receive the prefix and are expected to push it
+  down.
 - **`KeychainSecureStore`** — Apple backend over Keychain Services, using
   `kSecClassGenericPassword` keyed by service + account, with
   `kSecAttrAccessibleAfterFirstUnlock` so credentials stay readable to background and extension

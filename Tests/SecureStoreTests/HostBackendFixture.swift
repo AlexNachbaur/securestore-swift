@@ -61,9 +61,13 @@
         return SecureStoreStatus.ok
     }
 
-    private let hostAllKeys: SecureStoreHostCallbacks.AllKeysFn = { service, namespace, context, sink in
+    private let hostKeys: SecureStoreHostCallbacks.KeysFn = { service, namespace, prefix, context, sink in
+        let prefix = String(cString: prefix)
         let keys = storage.withLock { Array(($0[scope(service, namespace)] ?? [:]).keys) }
-        for key in keys {
+        // Filtered host-side, mirroring what a real host does — Windows pushes the prefix into
+        // `CredEnumerateW`, Android filters its own enumeration — so the suite exercises the
+        // contract rather than a Swift-side filter the ABI never sees.
+        for key in keys where prefix.isEmpty || key.hasPrefix(prefix) {
             key.withCString { sink(context, $0) }
         }
         return SecureStoreStatus.ok
@@ -73,7 +77,7 @@
 
         /// Registers the fixture through the public C entry point. Idempotent.
         static func install() {
-            securestoreRegisterHost(hostSet, hostGet, hostRemove, hostRemoveAll, hostAllKeys)
+            securestoreRegisterHost(hostSet, hostGet, hostRemove, hostRemoveAll, hostKeys)
         }
 
         static func reset() {

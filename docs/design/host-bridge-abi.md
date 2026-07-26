@@ -32,9 +32,9 @@ void securestore_register_host(
                    void (*sink)(void *context, const uint8_t *bytes, int32_t length)),
     int32_t (*remove)(const char *service, const char *namespace_, const char *key),
     int32_t (*remove_all)(const char *service, const char *namespace_),
-    int32_t (*all_keys)(const char *service, const char *namespace_,
-                        void *context,
-                        void (*sink)(void *context, const char *key)));
+    int32_t (*keys)(const char *service, const char *namespace_, const char *prefix,
+                    void *context,
+                    void (*sink)(void *context, const char *key)));
 ```
 
 ### Rule 1 — no heap pointers cross the boundary
@@ -47,7 +47,21 @@ The alternative — returning a malloc'd buffer for Swift to free — requires b
 an allocator and to keep agreeing across every future change. Sinks make that impossible to get
 wrong: ownership never changes hands.
 
-`all_keys` uses the same mechanism, invoking the sink once per key.
+`keys` uses the same mechanism, invoking the sink once per matching key.
+
+### Prefix, not pattern
+
+`keys` filters by **prefix** and nothing richer. That is not a simplification for its own sake — it
+is what the platforms provide. Windows Credential Manager's `CredEnumerateW` documents its filter
+as *"a name prefix followed by an asterisk"*, so a general glob or regex would have to be emulated
+in Swift on every platform, discarding the native filtering that makes enumeration cheap.
+
+An empty prefix means every key. Hosts whose platform filters natively should push the prefix down
+rather than enumerate everything and discard; hosts that cannot may filter themselves.
+
+This is what makes one-item-per-credential practical rather than packing many credentials into a
+single blob — the latter forces a read-modify-write on every update and runs into per-item size
+ceilings (Windows caps a credential blob at `CRED_MAX_CREDENTIAL_BLOB_SIZE`, 2,560 bytes).
 
 ### Rule 2 — every operation returns a status
 
@@ -83,6 +97,8 @@ A conforming host must:
 
 - **Scope items by `service` *and* `namespace`.** Two stores differing only in service must not
   see each other's items. `namespace` may be `NULL`.
+- **Match prefixes literally.** `keys` with prefix `"session"` must return `"session"` and
+  `"session.alice"` but not `"presession"`. It is a prefix test, not a substring search.
 - **Treat `set` as upsert.** Writing an existing key replaces its value; it must not duplicate.
 - **Preserve bytes exactly**, including embedded NULs and empty values. Values are arbitrary
   binary, not strings. A zero-length value is a stored value, distinct from a missing one.

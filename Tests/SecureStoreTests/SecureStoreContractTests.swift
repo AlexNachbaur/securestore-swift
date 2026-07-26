@@ -16,6 +16,22 @@ import Testing
 
 @testable import SecureStore
 
+/// Empties `store` after a test.
+///
+/// `defer` cannot throw, but discarding the error with `try?` is not an option — swallowing a
+/// failure is exactly the behaviour this package is built to prevent, so a cleanup failure is
+/// recorded as a test issue instead.
+private func cleanUp(
+    _ store: any SecureStore,
+    sourceLocation: SourceLocation = #_sourceLocation
+) {
+    do {
+        try store.removeAll()
+    } catch {
+        Issue.record("SecureStore cleanup failed: \(error)", sourceLocation: sourceLocation)
+    }
+}
+
 @Suite("SecureStore contract", .serialized)
 struct SecureStoreContractTests {
 
@@ -34,7 +50,7 @@ struct SecureStoreContractTests {
     @Test("A stored value reads back byte-for-byte")
     func roundTrip() throws {
         let store = try makeStore("round-trip")
-        defer { try? store.removeAll() }
+        defer { cleanUp(store) }
 
         let payload = Data("session-token-\u{1F511}".utf8)
         try store.set(payload, for: "session")
@@ -45,7 +61,7 @@ struct SecureStoreContractTests {
     @Test("A missing key reads as nil, not as an error")
     func missingKeyIsNil() throws {
         let store = try makeStore("missing")
-        defer { try? store.removeAll() }
+        defer { cleanUp(store) }
 
         #expect(try store.data(for: "never-written") == nil)
     }
@@ -53,7 +69,7 @@ struct SecureStoreContractTests {
     @Test("Writing the same key twice replaces rather than duplicates")
     func overwriteReplaces() throws {
         let store = try makeStore("overwrite")
-        defer { try? store.removeAll() }
+        defer { cleanUp(store) }
 
         try store.set(Data("first".utf8), for: "token")
         try store.set(Data("second".utf8), for: "token")
@@ -65,7 +81,7 @@ struct SecureStoreContractTests {
     @Test("Removing a key deletes only that key")
     func removeIsScoped() throws {
         let store = try makeStore("remove")
-        defer { try? store.removeAll() }
+        defer { cleanUp(store) }
 
         try store.set(Data("a".utf8), for: "keep")
         try store.set(Data("b".utf8), for: "drop")
@@ -78,7 +94,7 @@ struct SecureStoreContractTests {
     @Test("Removing a key that was never stored is not an error")
     func removeMissingIsNotAnError() throws {
         let store = try makeStore("remove-missing")
-        defer { try? store.removeAll() }
+        defer { cleanUp(store) }
 
         try store.remove("never-written")
     }
@@ -86,7 +102,7 @@ struct SecureStoreContractTests {
     @Test("removeAll empties the store")
     func removeAllEmpties() throws {
         let store = try makeStore("remove-all")
-        defer { try? store.removeAll() }
+        defer { cleanUp(store) }
 
         try store.set(Data("a".utf8), for: "one")
         try store.set(Data("b".utf8), for: "two")
@@ -99,7 +115,7 @@ struct SecureStoreContractTests {
     @Test("allKeys reports every stored key and nothing else")
     func allKeysReportsStoredKeys() throws {
         let store = try makeStore("all-keys")
-        defer { try? store.removeAll() }
+        defer { cleanUp(store) }
 
         #expect(try store.allKeys().isEmpty)
 
@@ -109,13 +125,62 @@ struct SecureStoreContractTests {
         #expect(Set(try store.allKeys()) == ["alpha", "beta"])
     }
 
+    @Test("keys(withPrefix:) returns only matching keys")
+    func prefixFiltersKeys() throws {
+        let store = try makeStore("prefix")
+        defer { cleanUp(store) }
+
+        try store.set(Data("a".utf8), for: "session.alice")
+        try store.set(Data("b".utf8), for: "session.bob")
+        try store.set(Data("c".utf8), for: "oauth.alice")
+
+        #expect(Set(try store.keys(withPrefix: "session.")) == ["session.alice", "session.bob"])
+        #expect(try store.keys(withPrefix: "oauth.") == ["oauth.alice"])
+    }
+
+    @Test("An empty prefix returns every key, so allKeys is a special case of it")
+    func emptyPrefixReturnsEverything() throws {
+        let store = try makeStore("prefix-empty")
+        defer { cleanUp(store) }
+
+        try store.set(Data("a".utf8), for: "one")
+        try store.set(Data("b".utf8), for: "two")
+
+        #expect(Set(try store.keys(withPrefix: "")) == Set(try store.allKeys()))
+        #expect(Set(try store.keys(withPrefix: "")) == ["one", "two"])
+    }
+
+    @Test("A prefix matching nothing returns empty, not an error")
+    func unmatchedPrefixIsEmpty() throws {
+        let store = try makeStore("prefix-miss")
+        defer { cleanUp(store) }
+
+        try store.set(Data("a".utf8), for: "session.alice")
+
+        #expect(try store.keys(withPrefix: "nope.").isEmpty)
+    }
+
+    @Test("Prefix matching is exact, not fuzzy — a key equal to the prefix matches")
+    func prefixIsLiteral() throws {
+        let store = try makeStore("prefix-literal")
+        defer { cleanUp(store) }
+
+        try store.set(Data("a".utf8), for: "session")
+        try store.set(Data("b".utf8), for: "session.alice")
+        try store.set(Data("c".utf8), for: "presession")
+
+        // "presession" must NOT match: this is a prefix, not a substring search — which also
+        // matches Windows `CredEnumerateW`'s documented "name prefix followed by an asterisk".
+        #expect(Set(try store.keys(withPrefix: "session")) == ["session", "session.alice"])
+    }
+
     @Test("Two stores with different services do not see each other's items")
     func servicesAreIsolated() throws {
         let first = try makeStore("isolation-a")
         let second = try makeStore("isolation-b")
         defer {
-            try? first.removeAll()
-            try? second.removeAll()
+            cleanUp(first)
+            cleanUp(second)
         }
 
         try first.set(Data("secret".utf8), for: "shared-key-name")
@@ -127,7 +192,7 @@ struct SecureStoreContractTests {
     @Test("Binary payloads survive intact, including NUL bytes")
     func binarySafe() throws {
         let store = try makeStore("binary")
-        defer { try? store.removeAll() }
+        defer { cleanUp(store) }
 
         let payload = Data([0x00, 0xFF, 0x10, 0x00, 0x7F])
         try store.set(payload, for: "blob")
@@ -138,7 +203,7 @@ struct SecureStoreContractTests {
     @Test("An empty value is stored and read back as empty, not as missing")
     func emptyValueRoundTrips() throws {
         let store = try makeStore("empty")
-        defer { try? store.removeAll() }
+        defer { cleanUp(store) }
 
         try store.set(Data(), for: "empty")
 

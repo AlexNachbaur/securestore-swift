@@ -25,8 +25,26 @@ public protocol SecureStore: Sendable {
     /// Removes every item in this store's service + namespace.
     func removeAll() throws
 
+    /// Keys in this store's service + namespace that begin with `prefix`, in unspecified order.
+    ///
+    /// Pass `""` for every key. Prefix — rather than a general pattern — is the primitive because
+    /// it is what the underlying platforms actually offer: Windows Credential Manager's
+    /// `CredEnumerateW` filter is documented as "a name prefix followed by an asterisk" and
+    /// supports nothing richer, so anything more expressive would have to be emulated in Swift on
+    /// every platform.
+    ///
+    /// This is what makes one-item-per-credential practical: store `"session.\(accountID)"` per
+    /// account and enumerate them with `keys(withPrefix: "session.")`, instead of packing every
+    /// account into a single blob.
+    func keys(withPrefix prefix: String) throws -> [String]
+}
+
+extension SecureStore {
+
     /// Every key currently stored in this store's service + namespace, in unspecified order.
-    func allKeys() throws -> [String]
+    public func allKeys() throws -> [String] {
+        try keys(withPrefix: "")
+    }
 }
 
 // MARK: - Configuration

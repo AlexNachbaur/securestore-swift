@@ -70,9 +70,14 @@
                 _ service: UnsafePointer<CChar>, _ namespace: UnsafePointer<CChar>?
             ) -> Int32
 
-        public typealias AllKeysFn =
+        /// Emits every key beginning with `prefix` through the sink. An empty `prefix` means every
+        /// key. Hosts whose platform supports prefix filtering natively — Windows Credential
+        /// Manager's `CredEnumerateW` takes exactly a name prefix — should push it down rather
+        /// than enumerate and discard.
+        public typealias KeysFn =
             @convention(c) (
                 _ service: UnsafePointer<CChar>, _ namespace: UnsafePointer<CChar>?,
+                _ prefix: UnsafePointer<CChar>,
                 _ context: UnsafeMutableRawPointer?, _ sink: SecureStoreKeySink
             ) -> Int32
 
@@ -80,20 +85,20 @@
         public let get: GetFn
         public let remove: RemoveFn
         public let removeAll: RemoveAllFn
-        public let allKeys: AllKeysFn
+        public let keys: KeysFn
 
         public init(
             set: @escaping SetFn,
             get: @escaping GetFn,
             remove: @escaping RemoveFn,
             removeAll: @escaping RemoveAllFn,
-            allKeys: @escaping AllKeysFn
+            keys: @escaping KeysFn
         ) {
             self.set = set
             self.get = get
             self.remove = remove
             self.removeAll = removeAll
-            self.allKeys = allKeys
+            self.keys = keys
         }
     }
 
@@ -119,7 +124,7 @@
         _ get: @escaping SecureStoreHostCallbacks.GetFn,
         _ remove: @escaping SecureStoreHostCallbacks.RemoveFn,
         _ removeAll: @escaping SecureStoreHostCallbacks.RemoveAllFn,
-        _ allKeys: @escaping SecureStoreHostCallbacks.AllKeysFn
+        _ keys: @escaping SecureStoreHostCallbacks.KeysFn
     ) {
         registerSecureStoreHost(
             SecureStoreHostCallbacks(
@@ -127,7 +132,7 @@
                 get: get,
                 remove: remove,
                 removeAll: removeAll,
-                allKeys: allKeys
+                keys: keys
             )
         )
     }
@@ -245,14 +250,16 @@
             try check(status)
         }
 
-        public func allKeys() throws -> [String] {
+        public func keys(withPrefix prefix: String) throws -> [String] {
             let host = try callbacks()
             var captured: [String] = []
             let status = withIdentity { service, namespace in
-                withUnsafeMutablePointer(to: &captured) { context in
-                    host.allKeys(service, namespace, UnsafeMutableRawPointer(context)) { context, key in
-                        guard let context, let key else { return }
-                        context.assumingMemoryBound(to: [String].self).pointee.append(String(cString: key))
+                prefix.withCString { prefix in
+                    withUnsafeMutablePointer(to: &captured) { context in
+                        host.keys(service, namespace, prefix, UnsafeMutableRawPointer(context)) { context, key in
+                            guard let context, let key else { return }
+                            context.assumingMemoryBound(to: [String].self).pointee.append(String(cString: key))
+                        }
                     }
                 }
             }

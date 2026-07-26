@@ -90,7 +90,7 @@
             }
         }
 
-        public func allKeys() throws -> [String] {
+        public func keys(withPrefix prefix: String) throws -> [String] {
             var query = serviceQuery()
             query[kSecReturnAttributes as String] = true
             query[kSecMatchLimit as String] = kSecMatchLimitAll
@@ -105,7 +105,14 @@
             guard let items = result as? [[String: Any]] else {
                 throw SecureStoreError.invalidData
             }
-            return items.compactMap { $0[kSecAttrAccount as String] as? String }
+
+            // Keychain Services has no prefix predicate — `kSecMatchSubjectStartsWith` applies to
+            // certificates, not generic-password accounts — so the filter happens here. The item
+            // set is scoped to one service, so this is a small in-memory pass, not a full
+            // keychain scan.
+            let accounts = items.compactMap { $0[kSecAttrAccount as String] as? String }
+            guard !prefix.isEmpty else { return accounts }
+            return accounts.filter { $0.hasPrefix(prefix) }
         }
 
         // MARK: - Queries

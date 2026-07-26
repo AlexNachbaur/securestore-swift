@@ -25,8 +25,12 @@ no Swift bindings.
 
 SecureStore solves that without dragging a Java-interop layer into your Swift code:
 
-- **One protocol, six operations.** `set`, `data(for:)`, `remove`, `removeAll`, `allKeys` — the
-  surface a token store actually needs, and nothing else.
+- **One protocol, a handful of operations.** `set`, `data(for:)`, `remove`, `removeAll`,
+  `keys(withPrefix:)` — the surface a token store actually needs, and nothing else. `allKeys()`
+  comes free as an empty prefix.
+- **Prefix enumeration, so one item per credential is practical.** Store
+  `"session.<accountID>"` per account and enumerate with `keys(withPrefix: "session.")`, rather
+  than packing everything into a single blob and re-encoding it on every write.
 - **No Apple concepts in the cross-platform API.** There is no `accessGroup` parameter. Sharing
   scope is an opaque `namespace` string, because Android has no App-Group equivalent and baking
   one platform's model into the API would defeat the purpose.
@@ -105,9 +109,9 @@ void securestore_register_host(
                    void (*sink)(void *context, const uint8_t *bytes, int32_t length)),
     int32_t (*remove)(const char *service, const char *namespace_, const char *key),
     int32_t (*remove_all)(const char *service, const char *namespace_),
-    int32_t (*all_keys)(const char *service, const char *namespace_,
-                        void *context,
-                        void (*sink)(void *context, const char *key)));
+    int32_t (*keys)(const char *service, const char *namespace_, const char *prefix,
+                    void *context,
+                    void (*sink)(void *context, const char *key)));
 ```
 
 Two rules govern that ABI, and they are what make it safe:
