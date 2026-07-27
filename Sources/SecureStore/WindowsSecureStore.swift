@@ -153,6 +153,27 @@
         // MARK: - SecureStore
 
         public func set(_ data: Data, for key: String) throws {
+            // `CredentialBlobSize` is a 32-bit DWORD while `data.count` is a 64-bit Int, and
+            // `DWORD(_:)` traps rather than truncating — so without this guard an oversized
+            // value crashes the process instead of throwing. Credential Manager rejects
+            // anything past CRED_MAX_CREDENTIAL_BLOB_SIZE (2,560 bytes) long before this point;
+            // the guard exists so the unrepresentable case is a diagnosable error rather than a
+            // crash, and the ordinary too-large case is left to Windows so the caller gets the
+            // system's own message.
+            guard data.count <= DWORD.max else {
+                throw SecureStoreError.platform(
+                    PlatformFailure(
+                        backend: .credentialManager,
+                        operation: .set,
+                        code: Int32(bitPattern: DWORD(ERROR_INVALID_PARAMETER)),
+                        message: """
+                            Value is \(data.count) bytes; Credential Manager cannot store more \
+                            than \(DWORD.max)
+                            """
+                    )
+                )
+            }
+
             let written = withWideString(targetName(for: key)) { target -> Bool in
                 data.withUnsafeBytes { buffer -> Bool in
                     guard let bytes = buffer.bindMemory(to: UInt8.self).baseAddress else {
