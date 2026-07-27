@@ -66,41 +66,38 @@ jobs:
         run: swift build
 
       # Exercises LinuxSecureStore against a real Secret Service, not a stub — which means one
-      # has to exist, and standing one up in a headless container takes three things:
+      # has to exist, and a fresh container has no keyrings at all.
       #
-      #   1. A session bus. gnome-keyring is reached over D-Bus, so `dbus-run-session` wraps
-      #      everything that shares it — both daemon invocations, the probe, and the tests.
-      #   2. A login keyring that exists. This is the part that took three CI rounds to get
-      #      right: `--unlock` only unlocks a keyring that is already there, so on a fresh
-      #      container it silently leaves you with none. `--login` is the mode that CREATES one
-      #      from a password on stdin. `--start` then brings up the secrets component against
-      #      it. The password is irrelevant — scratch state in a throwaway container.
-      #   3. A `default` collection alias, which is how the Secret Service resolves
-      #      SECRET_COLLECTION_DEFAULT. Written after the keyring exists, not before: an alias
-      #      naming a keyring that was never created is worse than no alias at all.
+      # `--unlock` with a NON-EMPTY password is what creates the login keyring and, having
+      # created it, registers it as the default collection. Every part of that sentence was
+      # learned the hard way here: an empty password makes the daemon treat the keyring as
+      # passwordless and skip creating it, and writing the `default` alias by hand beforehand
+      # only produces an alias naming a keyring that does not exist. The daemon owns that alias
+      # — do not pre-create it.
       #
-      # Get any of the three wrong and the symptom is not an obvious environment error. libsecret
-      # asks the daemon to create a collection, the daemon tries to activate a prompter to ask
-      # the user, and that fails headless — surfacing as every write failing while reads of
-      # absent keys still "pass" by correctly returning nothing. That reads like a backend bug.
+      # When this is wrong the symptom is not an obvious environment error: libsecret asks the
+      # daemon to create a collection, the daemon tries to activate a prompter to ask the user,
+      # and that fails headless. Writes fail while reads of absent keys still "pass" by
+      # correctly returning nothing — which reads exactly like a backend bug. Hence the
+      # secret-tool probe below, and the directory listing when it goes wrong.
       - name: Test
         run: |
           cat > /tmp/run-tests.sh <<'SCRIPT'
-          set -euo pipefail
-          eval "$(printf 'securestore-ci' | gnome-keyring-daemon --daemonize --login)"
-          eval "$(gnome-keyring-daemon --start --components=secrets)"
-
-          mkdir -p "$HOME/.local/share/keyrings"
-          printf 'login' > "$HOME/.local/share/keyrings/default"
-          ls -la "$HOME/.local/share/keyrings"
+          set -uo pipefail
+          eval "$(printf 'securestore-ci\n' | gnome-keyring-daemon --daemonize --unlock --components=secrets)"
 
           # Prove the environment before blaming the code. secret-tool is libsecret's own
           # client, so if this fails the container is misconfigured and LinuxSecureStore has
           # not been reached yet — which is worth knowing before reading 14 test failures.
-          echo probe | secret-tool store --label=probe securestore-ci probe
+          if ! echo probe | secret-tool store --label=probe securestore-ci probe; then
+              echo "::error::No usable Secret Service. Keyring directory contains:"
+              ls -la "$HOME/.local/share/keyrings" || echo "  (no keyrings directory)"
+              exit 1
+          fi
           secret-tool clear securestore-ci probe
           echo "Secret Service is reachable and writable."
 
+          set -e
           swift test
           SCRIPT
           dbus-run-session -- bash /tmp/run-tests.sh

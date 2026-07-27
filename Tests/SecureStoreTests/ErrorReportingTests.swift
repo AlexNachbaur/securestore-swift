@@ -75,6 +75,28 @@ struct PlatformFailureTests {
         let failure = PlatformFailure(backend: .keychain, operation: .listKeys, code: 1)
         #expect(failure.description == "Keychain Services key enumeration failed (code 1)")
     }
+}
+
+// MARK: - Configuration
+
+@Suite("SecureStoreConfiguration")
+struct SecureStoreConfigurationTests {
+
+    /// Credential Manager and the Secret Service must render a namespace into a lookup key, and
+    /// both spell "none" as the empty string — so an un-normalized `""` would select the same
+    /// items as `nil` there while staying distinct on Apple and the host bridge. Normalizing at
+    /// construction is what stops the four backends from disagreeing.
+    @Test("An empty namespace is the absence of one, on every backend")
+    func emptyNamespaceNormalizesToNil() {
+        #expect(SecureStoreConfiguration(service: "s", namespace: "").namespace == nil)
+        #expect(SecureStoreConfiguration(service: "s", namespace: nil).namespace == nil)
+        #expect(SecureStoreConfiguration(service: "s") == SecureStoreConfiguration(service: "s", namespace: ""))
+    }
+
+    @Test("A real namespace is preserved untouched")
+    func realNamespaceSurvives() {
+        #expect(SecureStoreConfiguration(service: "s", namespace: "team.shared").namespace == "team.shared")
+    }
 
     // MARK: - Real failures (platform-specific)
 

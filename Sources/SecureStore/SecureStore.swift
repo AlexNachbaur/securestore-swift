@@ -66,7 +66,17 @@ public struct SecureStoreConfiguration: Sendable, Equatable {
 
     public init(service: String, namespace: String? = nil) {
         self.service = service
-        self.namespace = namespace
+        // An empty namespace is not a scope — it is the absence of one — so it is normalized to
+        // `nil` here rather than left for each backend to interpret.
+        //
+        // This is load-bearing, not tidiness. Keychain Services and the host bridge can leave a
+        // namespace out of a query entirely, but Credential Manager and the Secret Service have
+        // to render one into a lookup key, and both spell "no namespace" as the empty string.
+        // Without normalizing, `nil` and `""` would select the same items on those two backends
+        // while remaining distinct on the other two — a store bleeding into another one on some
+        // platforms and not others, which is exactly the class of divergence this package
+        // exists to prevent.
+        self.namespace = (namespace?.isEmpty ?? true) ? nil : namespace
     }
 }
 

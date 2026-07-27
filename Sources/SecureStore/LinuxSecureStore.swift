@@ -208,11 +208,14 @@
             }
             defer { releaseValue(value) }
 
+            // Zero length means "stored, and empty" — absence was already handled above.
             var length: gsize = 0
-            guard let bytes = secret_value_get(value, &length), length > 0 else {
-                // Zero length means "stored, and empty" — absence was already handled above.
-                return Data()
-            }
+            let bytes = secret_value_get(value, &length)
+            guard length > 0 else { return Data() }
+
+            // A null buffer alongside a non-zero length is a value libsecret should never hand
+            // back. Reporting it as empty would turn a corrupt item into a plausible one.
+            guard let bytes else { throw SecureStoreError.invalidData }
             return Data(bytes: bytes, count: Int(length))
         }
 

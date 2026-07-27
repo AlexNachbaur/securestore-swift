@@ -205,11 +205,16 @@
             guard let credential else { throw SecureStoreError.invalidData }
             defer { CredFree(credential) }
 
+            // Zero length means "stored, and empty", which is not the same as absent —
+            // absence was already handled by ERROR_NOT_FOUND above.
             let count = Int(credential.pointee.CredentialBlobSize)
-            guard count > 0, let blob = credential.pointee.CredentialBlob else {
-                // Zero length means "stored, and empty", which is not the same as absent —
-                // absence was already handled by ERROR_NOT_FOUND above.
-                return Data()
+            guard count > 0 else { return Data() }
+
+            // A null blob alongside a non-zero length is a credential Credential Manager should
+            // never hand back. Reporting it as empty would turn a corrupt item into a plausible
+            // value, which is the same failure-swallowing the read path exists to prevent.
+            guard let blob = credential.pointee.CredentialBlob else {
+                throw SecureStoreError.invalidData
             }
             return Data(bytes: blob, count: count)
         }
