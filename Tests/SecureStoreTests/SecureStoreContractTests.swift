@@ -4,11 +4,13 @@
 //
 //  The behavioural contract every `SecureStore` must satisfy, written once and run against
 //  whichever backend the platform provides. Deliberately NOT platform-guarded: the point of this
-//  package is that Apple and Android behave the same, and the only way to hold that line is to
-//  run one body of assertions against both.
+//  package is that all four backends behave the same, and the only way to hold that line is to
+//  run one body of assertions against every one of them.
 //
-//  Apple runs it against the real Keychain. Hosts without Keychain Services run it against an
-//  in-memory host backend registered by `HostBackendFixture`, which also exercises the C ABI.
+//  Apple runs it against the real Keychain, Windows against the real Credential Manager, and
+//  Linux against a real Secret Service provider. Android — the one platform whose secure store
+//  is not reachable from Swift — runs it against an in-memory host backend registered by
+//  `HostBackendFixture`, which also exercises the C ABI.
 //
 
 import Foundation
@@ -39,8 +41,15 @@ struct SecureStoreContractTests {
     /// keychain and concurrent runs cannot collide.
     private func makeStore(_ label: String) throws -> any SecureStore {
         let service = "dev.securestore.tests.\(label).\(UUID().uuidString)"
+        // One branch per backend, mirroring the compile-time selection in Sources. Adding a
+        // backend without adding it here would leave it unasserted, which is the one thing this
+        // suite exists to prevent.
         #if canImport(Security)
             return KeychainSecureStore(service: service)
+        #elseif os(Windows)
+            return WindowsSecureStore(service: service)
+        #elseif os(Linux)
+            return LinuxSecureStore(service: service)
         #else
             HostBackendFixture.install()
             return HostSecureStore(service: service)

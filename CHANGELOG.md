@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`WindowsSecureStore`** — a native Windows backend over Credential Manager
+  (`CredWriteW`/`CredReadW`/`CredDeleteW`/`CredEnumerateW`), storing `CRED_TYPE_GENERIC`
+  credentials with `CRED_PERSIST_LOCAL_MACHINE`. Roaming persistence is deliberately not used:
+  an application's own tokens should not replicate to machines the user never authorised.
+  `keys(withPrefix:)` pushes the prefix into `CredEnumerateW`'s native filter.
+- **`LinuxSecureStore`** — a native Linux backend over the freedesktop.org Secret Service, via
+  libsecret. Items land in the user's default collection and searches unlock it on demand, so a
+  locked keyring prompts rather than reading as empty.
+- **`CSecret`** — a `.systemLibrary` target wrapping `<libsecret/secret.h>` through pkg-config.
+
+### Changed
+
+- **The host bridge is now Android-only.** `HostSecureStore`, `SecureStoreHostCallbacks`,
+  `registerSecureStoreHost` and the `securestore_register_host` C entry point were gated
+  `#if !canImport(Security)`, so they compiled on Windows and Linux; they are now
+  `#if !canImport(Security) && !os(Windows) && !os(Linux)`. **This removes API on those two
+  platforms.** A Windows or Linux host that was registering its own backend must switch to the
+  native store, which needs no registration at all. Backend selection stays compile-time and
+  the four gates remain mutually exclusive and exhaustive.
+- The contract suite gained Windows and Linux branches, so all four backends are asserted by
+  one body of tests rather than two.
+- CI now builds and tests on **macOS, Linux, Windows, and an Android emulator**, and *builds*
+  on an iOS simulator. The Linux job installs `libsecret-1-dev` and runs gnome-keyring under
+  `dbus-run-session`, so the suite exercises a real Secret Service rather than a stub.
+  - The iOS job is build-only, deliberately. A SwiftPM test bundle has no host application, so
+    the simulator grants it no keychain entitlement and every Keychain Services call fails with
+    `-34018` (`errSecMissingEntitlement`); supplying `CODE_SIGN_ENTITLEMENTS` with ad-hoc
+    signing does not work around it. Running the contract suite on iOS would require checking
+    an `.xcodeproj` with a host app target into a pure-SwiftPM package. macOS remains the job
+    that asserts Keychain behaviour.
+- The lint job now gates every other job, and the Linux job gates the expensive runners.
+- Dependabot now watches the `github-actions` ecosystem. The `swift` ecosystem was removed: the
+  package has no SwiftPM dependencies, so it had nothing to do and read as coverage that did not
+  exist.
+- Actions moved to current majors (`checkout` v6 → v7, `cache` v4 → v6).
+
+### Note on the dependency policy
+
+The package was previously dependency-free by policy. It now has exactly one dependency,
+libsecret, scoped to Linux by `.when(platforms: [.linux])` — no other platform requires
+`libsecret-1-dev` to build. This was an explicit decision, not drift; the policy is otherwise
+unchanged.
+
 ## [0.1.0] - 2026-07-26
 
 Initial release.

@@ -2,15 +2,17 @@
 
 [![Build](https://github.com/AlexNachbaur/securestore-swift/actions/workflows/build.yml/badge.svg)](https://github.com/AlexNachbaur/securestore-swift/actions/workflows/build.yml)
 [![Swift 6.3](https://img.shields.io/badge/Swift-6.3-orange.svg)](https://swift.org)
-[![Platforms](https://img.shields.io/badge/Platforms-macOS%20%7C%20iOS%20%7C%20watchOS%20%7C%20tvOS%20%7C%20visionOS%20%7C%20Android-blue.svg)](#requirements)
+[![Platforms](https://img.shields.io/badge/Platforms-macOS%20%7C%20iOS%20%7C%20watchOS%20%7C%20tvOS%20%7C%20visionOS%20%7C%20Linux%20%7C%20Windows%20%7C%20Android-blue.svg)](#requirements)
 [![License: MIT](https://img.shields.io/badge/License-MIT-lightgrey.svg)](LICENSE)
 
-One secure-credential API for Swift, on Apple platforms and Android.
+One secure-credential API for Swift, on Apple platforms, Windows, Linux, and Android.
 
 SecureStore gives you a single `SecureStore` protocol for reading and writing small secrets —
-tokens, refresh credentials, keys. On Apple platforms it talks to Keychain Services directly. On
-Android, where the secure store is Java-side, the host app registers a backend through a small C
-entry point and Swift forwards to it. Callers never learn which platform they are on.
+tokens, refresh credentials, keys. Every platform whose secure store is reachable from Swift
+gets a native backend: Keychain Services on Apple, Credential Manager on Windows, the
+freedesktop.org Secret Service on Linux. Android's store is Java-side, so the host app registers
+a backend through a small C entry point and Swift forwards to it. Callers never learn which
+platform they are on.
 
 > **Status: pre-1.0.** The API is small and the behavioural contract is covered by a test suite
 > that runs against every backend, but the API may still evolve before `1.0.0`. Breaking changes
@@ -74,11 +76,18 @@ To stay platform-agnostic, depend on the protocol and construct the concrete sto
 func makeStore(service: String) -> any SecureStore {
     #if canImport(Security)
         KeychainSecureStore(service: service)
+    #elseif os(Windows)
+        WindowsSecureStore(service: service)
+    #elseif os(Linux)
+        LinuxSecureStore(service: service)
     #else
         HostSecureStore(service: service)
     #endif
 }
 ```
+
+Exactly one backend type exists per platform, so the branch that compiles is the only correct
+one — there is no runtime selection and nothing to configure.
 
 ### Sharing between processes
 
@@ -136,9 +145,23 @@ See [docs/design/host-bridge-abi.md](docs/design/host-bridge-abi.md) for the ful
 | Platform | Backend |
 |---|---|
 | iOS 13+ / macOS 10.15+ / watchOS 7+ / tvOS 13+ / visionOS 1+ | `KeychainSecureStore` — Keychain Services |
+| Windows | `WindowsSecureStore` — Credential Manager (`CredWriteW` and friends) |
+| Linux | `LinuxSecureStore` — freedesktop.org Secret Service, via libsecret |
 | Android | `HostSecureStore` — host-registered callbacks |
 
 Swift 6.3+. Android builds use the official [Swift SDK for Android](https://www.swift.org/documentation/articles/swift-sdk-for-android-getting-started.html).
+
+Two platform-specific notes worth knowing before you depend on this:
+
+- **Linux needs libsecret at build time.** Install `libsecret-1-dev` (Debian/Ubuntu) or
+  `libsecret-devel` (Fedora/RHEL); it is reached through pkg-config. The dependency is scoped to
+  Linux, so no other platform requires it. At *run* time a Secret Service provider must be
+  present — gnome-keyring, KWallet's Secret Service bridge, or KeePassXC. A headless host with
+  none of them will fail loudly on first use rather than silently persisting nothing.
+- **Windows caps a credential at 2,560 bytes** (`CRED_MAX_CREDENTIAL_BLOB_SIZE`), far below
+  what Keychain Services allows. Exceeding it fails with a platform error rather than
+  truncating, but it is a real portability limit if you were treating a secure store as
+  general-purpose storage.
 
 ## Testing
 

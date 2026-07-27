@@ -1,4 +1,8 @@
-#if !canImport(Security)
+// Every platform with a Swift-reachable secure store now has a native backend, so the host
+// bridge is what remains for the ones that do not: Android, whose Keystore is Java, and any
+// future host in the same position. Backend selection stays compile-time — exactly one backend
+// exists per platform, and this is the negative space left by the other three.
+#if !canImport(Security) && !os(Windows) && !os(Linux)
 
     import Foundation
     import Synchronization

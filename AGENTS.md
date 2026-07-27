@@ -6,12 +6,17 @@ Instructions for AI agents working in the securestore-swift repository itself. I
 
 ## What this package is
 
-A cross-platform secure-credential store: one `SecureStore` protocol (set, read, remove, removeAll, `keys(withPrefix:)`), a Keychain Services backend
-for Apple, and a host-registered C-bridge backend for platforms without a Swift-native secure
-store (Android). Swift 6.3+, one library target, no dependencies.
+A cross-platform secure-credential store: one `SecureStore` protocol (set, read, remove,
+removeAll, `keys(withPrefix:)`) and four backends, selected at compile time — Keychain Services
+on Apple, Credential Manager on Windows, the freedesktop.org Secret Service on Linux, and a
+host-registered C bridge for platforms with no Swift-reachable store (Android). Swift 6.3+, one
+library target plus the `CSecret` system-library shim.
 
-Keeping it dependency-free is deliberate — it is linked into credential paths on multiple
-platforms. Do not add a dependency without raising it first.
+The only external dependency is libsecret, and it is scoped to Linux by a
+`.when(platforms: [.linux])` condition on the target dependency — that condition is load-bearing,
+because without it `libsecret-1-dev` becomes a build requirement on every platform. This package
+is linked into credential paths on multiple platforms; do not add another dependency, or widen
+that condition, without raising it first.
 
 ## Non-negotiable design rules
 

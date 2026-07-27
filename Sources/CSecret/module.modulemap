@@ -1,0 +1,12 @@
+// libsecret, the GNOME client library for the freedesktop.org Secret Service API. Used only by
+// `LinuxSecureStore`; nothing outside Linux depends on this target, so nothing outside Linux
+// needs libsecret installed.
+//
+// The include path and link flags come from `pkg-config --cflags --libs libsecret-1`, declared
+// on the `.systemLibrary` target in Package.swift. The `link` line below is a fallback for
+// toolchains that resolve the module without consulting pkg-config.
+module CSecret [system] {
+    header "shim.h"
+    link "secret-1"
+    export *
+}

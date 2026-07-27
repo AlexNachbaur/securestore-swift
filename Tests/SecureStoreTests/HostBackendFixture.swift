@@ -10,7 +10,9 @@
 //  constraint is the point: it is what makes these pointers safe to hand to JNI.
 //
 
-#if !canImport(Security)
+// Matches the gate on `HostSecureStore` itself: the fixture only exists where the host bridge
+// does. Windows and Linux run the same contract suite against their native backends instead.
+#if !canImport(Security) && !os(Windows) && !os(Linux)
 
     import Foundation
     import Synchronization

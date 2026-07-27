@@ -3,12 +3,24 @@
 How Swift reaches a secure store that lives outside Swift — Android's Keystore, or any other
 host-provided implementation.
 
+## Scope
+
+This bridge covers the platforms whose secure store is *not* reachable from Swift. That is now
+Android alone; Apple, Windows and Linux all have native backends
+(`KeychainSecureStore`, `WindowsSecureStore`, `LinuxSecureStore`), and the host bridge does not
+compile on any of them. If a future platform is added with no Swift-reachable store, it joins
+Android under this same ABI rather than getting a fifth bespoke backend.
+
 ## Why a bridge at all
 
 On Apple platforms `SecureStore` is satisfied natively: `KeychainSecureStore` calls Keychain
-Services and there is nothing to bridge. Android has no Swift-native secure store. Its equivalent
-is Java — `AndroidKeyStore`, usually reached through `EncryptedSharedPreferences` — and the
-options for calling it from Swift are:
+Services and there is nothing to bridge. The same is true of Windows (Credential Manager, via
+the Win32 `Cred*` functions) and Linux (the freedesktop.org Secret Service, via libsecret) —
+both are plain C APIs that Swift can call directly.
+
+Android is the exception. It has no Swift-native secure store; its equivalent is Java —
+`AndroidKeyStore`, usually reached through `EncryptedSharedPreferences` — and the options for
+calling it from Swift are:
 
 1. **Generate Java bindings** with `swift-java`/`jextract` in JNI mode, and call the Java API from
    Swift.
@@ -55,6 +67,8 @@ wrong: ownership never changes hands.
 is what the platforms provide. Windows Credential Manager's `CredEnumerateW` documents its filter
 as *"a name prefix followed by an asterisk"*, so a general glob or regex would have to be emulated
 in Swift on every platform, discarding the native filtering that makes enumeration cheap.
+(`WindowsSecureStore` now pushes the prefix into `CredEnumerateW` for exactly this reason, which
+makes the constraint a demonstrated one rather than an anticipated one.)
 
 An empty prefix means every key. Hosts whose platform filters natively should push the prefix down
 rather than enumerate everything and discard; hosts that cannot may filter themselves.
