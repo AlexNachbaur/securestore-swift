@@ -136,8 +136,19 @@ Two rules govern that ABI, and they are what make it safe:
    nothing to double-free.
 2. **Every operation returns a status.** `0` is success and `1` means "no such item" — not an
    error for reads or removals. Any other value is surfaced as
-   `SecureStoreError.platform(code:)` carrying the host's own code, so a failure in the field can
-   be traced to a specific platform error rather than a generic one.
+   `SecureStoreError.platform(PlatformFailure)` carrying the host's own code, so a failure in the
+   field can be traced to a specific platform error rather than a generic one:
+
+   ```swift
+   do {
+       try store.set(token, for: "session")
+   } catch let SecureStoreError.platform(failure) {
+       log("\(failure)")        // "host backend set failed (code 42): ..."
+       report(code: failure.code)
+   }
+   ```
+
+   Register a describer (above) and `failure.message` carries your own text instead of `nil`.
 
 Until a host registers, every operation throws `SecureStoreError.backendNotRegistered`. That is
 deliberate: a store that silently appears to work while persisting nothing is far worse than a

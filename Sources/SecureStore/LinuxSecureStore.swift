@@ -126,8 +126,15 @@
         }
 
         /// Runs `body` with the attribute table for `key` (or for the whole store when `nil`).
+        ///
+        /// The allocation failure is not reachable in practice — GLib aborts the process on
+        /// out-of-memory rather than returning NULL, so `g_hash_table_new_full` only imports as
+        /// optional because C says it can. It is still not reported as `.invalidData`, which is
+        /// documented as "stored bytes could not be read back as data": a caller diagnosing that
+        /// would go looking at the stored item, and there is no stored item involved here.
         private func withAttributes<Result>(
             key: String?,
+            for operation: PlatformFailure.Operation,
             _ body: (OpaquePointer) throws -> Result
         ) throws -> Result {
             guard
@@ -136,7 +143,16 @@
                     namespace: configuration.namespace,
                     key: key
                 )
-            else { throw SecureStoreError.invalidData }
+            else {
+                throw SecureStoreError.platform(
+                    PlatformFailure(
+                        backend: .secretService,
+                        operation: operation,
+                        code: 0,
+                        message: "could not allocate the attribute table"
+                    )
+                )
+            }
             defer { g_hash_table_unref(table) }
             return try body(table)
         }
@@ -150,18 +166,21 @@
         // MARK: - SecureStore
 
         public func set(_ data: Data, for key: String) throws {
-            try withAttributes(key: key) { attributes in
+            try withAttributes(key: key, for: .set) { attributes in
                 try data.withUnsafeBytes { buffer in
                     // `secret_value_new` copies, so the buffer only has to outlive this call.
-                    // An empty `Data` has no base address; the length is what carries the
-                    // meaning, and storing an empty value must stay distinct from storing
-                    // nothing.
+                    //
+                    // An empty `Data` has no base address, and libsecret does not document NULL
+                    // as acceptable even alongside a zero length — so a stack byte is pointed at
+                    // instead and the length carries the meaning. Storing an empty value has to
+                    // keep working: it is distinct from storing nothing, and the contract suite
+                    // asserts exactly that.
+                    var placeholder: CChar = 0
                     let bytes = buffer.bindMemory(to: CChar.self).baseAddress
                     guard
-                        let value = secret_value_new(
-                            bytes,
-                            gssize(data.count),
-                            "application/octet-stream"
+                        let value = withUnsafePointer(
+                            to: &placeholder,
+                            { secret_value_new(bytes ?? $0, gssize(data.count), "application/octet-stream") }
                         )
                     else { throw SecureStoreError.invalidData }
                     defer { releaseValue(value) }
@@ -267,7 +286,7 @@
             var flags = SECRET_SEARCH_ALL.rawValue | SECRET_SEARCH_UNLOCK.rawValue
             if loadSecrets { flags |= SECRET_SEARCH_LOAD_SECRETS.rawValue }
 
-            return try withAttributes(key: key) { attributes in
+            return try withAttributes(key: key, for: operation) { attributes in
                 var error: UnsafeMutablePointer<GError>?
                 let items = secret_service_search_sync(
                     nil,
@@ -287,7 +306,7 @@
         /// `secret_service_clear_sync` returns false when nothing matched, which is not a
         /// failure: absent is the caller's desired end state, matching every other backend.
         private func clear(key: String?, for operation: PlatformFailure.Operation) throws {
-            try withAttributes(key: key) { attributes in
+            try withAttributes(key: key, for: operation) { attributes in
                 var error: UnsafeMutablePointer<GError>?
                 _ = secret_service_clear_sync(nil, nil, attributes, nil, &error)
                 if let error { throw consume(error, operation) }
