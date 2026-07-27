@@ -55,6 +55,26 @@
         return table
     }
 
+    // libsecret's two handle types import differently, and the difference is not cosmetic.
+    //
+    // `SecretItem` is a GObject with a public struct, so `SecretItem *` arrives as a typed
+    // `UnsafeMutablePointer<SecretItem>`. `SecretValue` is an opaque boxed type, so
+    // `SecretValue *` arrives as an `OpaquePointer` — and its refcounting helpers are declared
+    // against bare `gpointer` rather than the type, so releasing one needs an explicit cast.
+    // `GList` payloads are `gpointer`-erased and have to be bound back to a type by hand.
+    //
+    // These two shims exist so that conversion noise stays out of the operations themselves.
+
+    /// Releases a `SecretValue`, whose unref helper takes an untyped `gpointer`.
+    private func releaseValue(_ value: OpaquePointer) {
+        secret_value_unref(UnsafeMutableRawPointer(value))
+    }
+
+    /// Binds a `GList` node's erased payload back to `SecretItem`.
+    private func secretItem(_ payload: UnsafeMutableRawPointer) -> UnsafeMutablePointer<SecretItem> {
+        payload.assumingMemoryBound(to: SecretItem.self)
+    }
+
     /// Translates a `GError` into a `SecureStoreError`, freeing it.
     ///
     /// `code` is the domain-specific error number the Secret Service returned, kept verbatim so a
@@ -128,7 +148,7 @@
                             "application/octet-stream"
                         )
                     else { throw SecureStoreError.invalidData }
-                    defer { secret_value_unref(value) }
+                    defer { releaseValue(value) }
 
                     var error: UnsafeMutablePointer<GError>?
                     let stored = secret_service_store_sync(
@@ -154,12 +174,11 @@
             // No match is `nil`, not an error. Anything that could not be read has already
             // thrown out of `search`.
             guard let first = items?.pointee.data else { return nil }
-            let item = OpaquePointer(first)
 
-            guard let value = secret_item_get_secret(item) else {
+            guard let value = secret_item_get_secret(secretItem(first)) else {
                 throw SecureStoreError.invalidData
             }
-            defer { secret_value_unref(value) }
+            defer { releaseValue(value) }
 
             var length: gsize = 0
             guard let bytes = secret_value_get(value, &length), length > 0 else {
@@ -185,8 +204,8 @@
             var node = items
             while let current = node {
                 defer { node = current.pointee.next }
-                guard let data = current.pointee.data else { continue }
-                guard let attributes = secret_item_get_attributes(OpaquePointer(data)) else {
+                guard let payload = current.pointee.data else { continue }
+                guard let attributes = secret_item_get_attributes(secretItem(payload)) else {
                     continue
                 }
                 defer { g_hash_table_unref(attributes) }
