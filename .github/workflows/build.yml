@@ -67,25 +67,25 @@ jobs:
 
       # Exercises LinuxSecureStore against a real Secret Service, not a stub.
       #
-      # XDG_DATA_HOME is the load-bearing line, and it is not obvious. gnome-keyring stores
-      # keyrings in $XDG_DATA_HOME/keyrings, defaulting to $HOME/.local/share/keyrings — and on
-      # a container job GitHub sets HOME=/github/home, which is a BIND MOUNT from the runner
-      # host. gnome-keyring cannot use a keyring directory there: it writes a 105-byte stub it
-      # then cannot read back ("keyring was in an invalid or unrecognized format"), falls back
-      # to asking a prompter, and the prompter cannot run headless. Pointing XDG_DATA_HOME at
-      # container-local storage is enough; HOME can stay where GitHub put it.
+      # The wait loop is the load-bearing part, and the bug it fixes is a race that CI loses and
+      # a developer machine usually wins — which is exactly why it survived several rounds of
+      # "obviously correct" incantations.
       #
-      # Reproduced and fixed locally under `docker run -v ...:/github/home -e HOME=/github/home`
-      # before being committed. The same incantation passes on ordinary container-local storage,
-      # which is why it looked correct for several rounds while failing only here.
+      # `gnome-keyring-daemon --daemonize` RETURNS BEFORE IT HAS CLAIMED org.freedesktop.secrets.
+      # Measured in a container: NameHasOwner is false immediately after the call returns and
+      # true about two seconds later. Anything that talks to the Secret Service inside that
+      # window does not reach this daemon at all — D-Bus instead *activates* a second
+      # gnome-keyring-daemon, which never received the password, cannot read the keyring the
+      # first one wrote ("keyring was in an invalid or unrecognized format"), and falls back to
+      # a prompter that cannot run headless.
       #
-      # The password is empty and newline-terminated: empty so the keyring auto-unlocks for
-      # whichever daemon ends up serving the bus, newline-terminated or the daemon never creates
-      # it at all.
+      # So: wait for the name, and fail loudly if it never appears rather than proceeding into a
+      # misleading pile of test failures.
       #
-      # When any of this is wrong the symptom is not an obvious environment error — writes fail
-      # while reads of absent keys still "pass" by correctly returning nothing, which reads like
-      # a backend bug. Hence the probe before the suite.
+      # The password is empty and newline-terminated: empty so the keyring auto-unlocks,
+      # newline-terminated or the daemon never creates it at all. XDG_DATA_HOME keeps the
+      # keyring on container-local storage rather than GitHub's bind-mounted HOME — hygiene
+      # rather than a fix, but it keeps scratch state off a mount shared with the host.
       - name: Test
         env:
           XDG_DATA_HOME: /tmp/xdg-data
@@ -94,6 +94,19 @@ jobs:
           cat > /tmp/run-tests.sh <<'SCRIPT'
           set -uo pipefail
           eval "$(printf '\n' | gnome-keyring-daemon --daemonize --unlock --components=secrets)"
+
+          owned=""
+          for _ in $(seq 1 60); do
+              owned=$(dbus-send --session --dest=org.freedesktop.DBus --print-reply \
+                  /org/freedesktop/DBus org.freedesktop.DBus.NameHasOwner \
+                  string:org.freedesktop.secrets 2>/dev/null | tail -1 | grep -o 'true')
+              [ "$owned" = "true" ] && break
+              sleep 0.5
+          done
+          if [ "$owned" != "true" ]; then
+              echo "::error::gnome-keyring never claimed org.freedesktop.secrets"
+              exit 1
+          fi
 
           # Prove the environment before blaming the code. secret-tool is libsecret's own
           # client, so if this fails the container is misconfigured and LinuxSecureStore has
