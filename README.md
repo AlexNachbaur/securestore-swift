@@ -50,7 +50,7 @@ SecureStore solves that without dragging a Java-interop layer into your Swift co
 ## Installation
 
 ```swift
-.package(url: "https://github.com/AlexNachbaur/securestore-swift.git", from: "0.1.0")
+.package(url: "https://github.com/AlexNachbaur/securestore-swift.git", from: "0.2.0")
 ```
 
 ```swift
