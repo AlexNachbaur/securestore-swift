@@ -69,28 +69,30 @@ jobs:
       # has to exist, and standing one up in a headless container takes three things:
       #
       #   1. A session bus. gnome-keyring is reached over D-Bus, so `dbus-run-session` wraps
-      #      everything that has to share it — the daemon, the probe, and the test run.
-      #   2. An unlocked login keyring. `--unlock` reads a password from stdin and creates the
-      #      keyring if absent, provided the password is non-empty (see below).
-      #      `--components=secrets` skips the ssh and pkcs11 agents.
-      #   3. A `default` collection alias. This is the part that is easy to miss: the Secret
-      #      Service resolves SECRET_COLLECTION_DEFAULT through this file, and a fresh
-      #      container has no keyrings directory at all. Without it, libsecret asks the daemon
-      #      to create a collection, the daemon tries to activate a prompter to ask the user,
-      #      and in a container that activation fails. The symptom is not an obvious
-      #      environment error — every write fails while reads of absent keys still "pass" by
-      #      correctly returning nothing, which reads like a backend bug.
+      #      everything that shares it — both daemon invocations, the probe, and the tests.
+      #   2. A login keyring that exists. This is the part that took three CI rounds to get
+      #      right: `--unlock` only unlocks a keyring that is already there, so on a fresh
+      #      container it silently leaves you with none. `--login` is the mode that CREATES one
+      #      from a password on stdin. `--start` then brings up the secrets component against
+      #      it. The password is irrelevant — scratch state in a throwaway container.
+      #   3. A `default` collection alias, which is how the Secret Service resolves
+      #      SECRET_COLLECTION_DEFAULT. Written after the keyring exists, not before: an alias
+      #      naming a keyring that was never created is worse than no alias at all.
+      #
+      # Get any of the three wrong and the symptom is not an obvious environment error. libsecret
+      # asks the daemon to create a collection, the daemon tries to activate a prompter to ask
+      # the user, and that fails headless — surfacing as every write failing while reads of
+      # absent keys still "pass" by correctly returning nothing. That reads like a backend bug.
       - name: Test
         run: |
           cat > /tmp/run-tests.sh <<'SCRIPT'
           set -euo pipefail
-          # A NON-EMPTY password is required. With an empty one the daemon treats the keyring as
-          # having no password and never creates login.keyring, which leaves the default alias
-          # below pointing at nothing — "Object does not exist at path
-          # /org/freedesktop/secrets/collection/login". The value itself is irrelevant: this is
-          # scratch state in a throwaway container, not a secret.
-          eval "$(printf 'securestore-ci' | gnome-keyring-daemon --unlock --components=secrets)"
-          export GNOME_KEYRING_CONTROL
+          eval "$(printf 'securestore-ci' | gnome-keyring-daemon --daemonize --login)"
+          eval "$(gnome-keyring-daemon --start --components=secrets)"
+
+          mkdir -p "$HOME/.local/share/keyrings"
+          printf 'login' > "$HOME/.local/share/keyrings/default"
+          ls -la "$HOME/.local/share/keyrings"
 
           # Prove the environment before blaming the code. secret-tool is libsecret's own
           # client, so if this fails the container is misconfigured and LinuxSecureStore has
@@ -101,8 +103,6 @@ jobs:
 
           swift test
           SCRIPT
-          mkdir -p "$HOME/.local/share/keyrings"
-          printf 'login' > "$HOME/.local/share/keyrings/default"
           dbus-run-session -- bash /tmp/run-tests.sh
 
   macos:
