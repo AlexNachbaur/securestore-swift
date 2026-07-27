@@ -65,32 +65,34 @@ jobs:
       - name: Build
         run: swift build
 
-      # Exercises LinuxSecureStore against a real Secret Service, not a stub — which means one
-      # has to exist, and a fresh container has none.
+      # Exercises LinuxSecureStore against a real Secret Service, not a stub.
       #
-      # Two details, both learned from failures on this branch:
+      # XDG_DATA_HOME is the load-bearing line, and it is not obvious. gnome-keyring stores
+      # keyrings in $XDG_DATA_HOME/keyrings, defaulting to $HOME/.local/share/keyrings — and on
+      # a container job GitHub sets HOME=/github/home, which is a BIND MOUNT from the runner
+      # host. gnome-keyring cannot use a keyring directory there: it writes a 105-byte stub it
+      # then cannot read back ("keyring was in an invalid or unrecognized format"), falls back
+      # to asking a prompter, and the prompter cannot run headless. Pointing XDG_DATA_HOME at
+      # container-local storage is enough; HOME can stay where GitHub put it.
       #
-      #   1. The password on stdin must be NEWLINE-TERMINATED, or the daemon never creates the
-      #      keyring at all and everything downstream fails with "Object does not exist at path
-      #      /org/freedesktop/secrets/collection/login".
-      #   2. The password must be EMPTY. A non-empty one encrypts the login keyring, and D-Bus
-      #      then activates its own gnome-keyring-daemon to serve org.freedesktop.secrets — a
-      #      second process that never received the password, cannot decrypt what the first one
-      #      wrote ("keyring was in an invalid or unrecognized format"), and falls back to
-      #      prompting. Headless, that prompt fails. An empty password leaves the keyring
-      #      auto-unlocking, so whichever daemon ends up serving the bus can read it.
+      # Reproduced and fixed locally under `docker run -v ...:/github/home -e HOME=/github/home`
+      # before being committed. The same incantation passes on ordinary container-local storage,
+      # which is why it looked correct for several rounds while failing only here.
       #
-      # Together those mean `printf '\n'` — an empty line, not an empty string. The keyring is
-      # scratch state in a throwaway container, so an unencrypted one is not a concern.
+      # The password is empty and newline-terminated: empty so the keyring auto-unlocks for
+      # whichever daemon ends up serving the bus, newline-terminated or the daemon never creates
+      # it at all.
       #
-      # When this is wrong the symptom is not an obvious environment error: writes fail while
-      # reads of absent keys still "pass" by correctly returning nothing, which reads exactly
-      # like a backend bug. Hence the probe below, and the listing when it fails.
+      # When any of this is wrong the symptom is not an obvious environment error — writes fail
+      # while reads of absent keys still "pass" by correctly returning nothing, which reads like
+      # a backend bug. Hence the probe before the suite.
       - name: Test
+        env:
+          XDG_DATA_HOME: /tmp/xdg-data
         run: |
+          mkdir -p "$XDG_DATA_HOME"
           cat > /tmp/run-tests.sh <<'SCRIPT'
           set -uo pipefail
-          rm -rf "$HOME/.local/share/keyrings"
           eval "$(printf '\n' | gnome-keyring-daemon --daemonize --unlock --components=secrets)"
 
           # Prove the environment before blaming the code. secret-tool is libsecret's own
@@ -98,7 +100,7 @@ jobs:
           # not been reached yet — which is worth knowing before reading 14 test failures.
           if ! echo probe | secret-tool store --label=probe securestore-ci probe; then
               echo "::error::No usable Secret Service. Keyring directory contains:"
-              ls -la "$HOME/.local/share/keyrings" || echo "  (no keyrings directory)"
+              ls -la "$XDG_DATA_HOME/keyrings" || echo "  (no keyrings directory)"
               exit 1
           fi
           secret-tool clear securestore-ci probe
