@@ -3,6 +3,24 @@
     import Foundation
     import Security
 
+    /// Wraps an `OSStatus` with the message Security Services has for it.
+    ///
+    /// `SecCopyErrorMessageString` is the framework's own lookup, so the text matches what
+    /// Apple's tooling reports for the same status rather than a table maintained here that
+    /// would drift.
+    private func keychainFailure(_ status: OSStatus, _ operation: PlatformFailure.Operation)
+        -> SecureStoreError
+    {
+        .platform(
+            PlatformFailure(
+                backend: .keychain,
+                operation: operation,
+                code: status,
+                message: SecCopyErrorMessageString(status, nil) as String?
+            )
+        )
+    }
+
     /// `SecureStore` over Apple Keychain Services.
     ///
     /// Items are `kSecClassGenericPassword`, keyed by service + account, which is the shape a
@@ -37,7 +55,7 @@
             if addStatus == errSecSuccess { return }
 
             guard addStatus == errSecDuplicateItem else {
-                throw SecureStoreError.platform(code: addStatus)
+                throw keychainFailure(addStatus, .set)
             }
 
             let updateStatus = SecItemUpdate(
@@ -45,7 +63,7 @@
                 [kSecValueData as String: data] as CFDictionary
             )
             guard updateStatus == errSecSuccess else {
-                throw SecureStoreError.platform(code: updateStatus)
+                throw keychainFailure(updateStatus, .set)
             }
         }
 
@@ -59,7 +77,7 @@
 
             if status == errSecItemNotFound { return nil }
             guard status == errSecSuccess else {
-                throw SecureStoreError.platform(code: status)
+                throw keychainFailure(status, .read)
             }
             guard let data = result as? Data else {
                 throw SecureStoreError.invalidData
@@ -71,7 +89,7 @@
             let status = SecItemDelete(baseQuery(for: key) as CFDictionary)
             // Deleting something already absent is the caller's desired end state, not a failure.
             guard status == errSecSuccess || status == errSecItemNotFound else {
-                throw SecureStoreError.platform(code: status)
+                throw keychainFailure(status, .remove)
             }
         }
 
@@ -85,7 +103,7 @@
                 let status = SecItemDelete(serviceQuery() as CFDictionary)
                 if status == errSecItemNotFound { return }
                 guard status == errSecSuccess else {
-                    throw SecureStoreError.platform(code: status)
+                    throw keychainFailure(status, .removeAll)
                 }
             }
         }
@@ -100,7 +118,7 @@
 
             if status == errSecItemNotFound { return [] }
             guard status == errSecSuccess else {
-                throw SecureStoreError.platform(code: status)
+                throw keychainFailure(status, .listKeys)
             }
             guard let items = result as? [[String: Any]] else {
                 throw SecureStoreError.invalidData

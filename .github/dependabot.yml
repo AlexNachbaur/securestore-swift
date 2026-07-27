@@ -1,11 +1,22 @@
-# To get started with Dependabot version updates, you'll need to specify which
-# package ecosystems to update and where the package manifests are located.
-# Please see the documentation for all configuration options:
+# Dependabot version updates.
 # https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
 
 version: 2
 updates:
-  - package-ecosystem: "swift"
+  # The `swift` ecosystem is deliberately absent. This package has no SwiftPM dependencies —
+  # its one external dependency, libsecret, is a system library resolved through pkg-config and
+  # versioned by the distribution, not by Package.resolved — so a swift entry would have nothing
+  # to do and would read as coverage that does not exist.
+  #
+  # The actions are the real moving parts, and they are also the supply-chain surface that
+  # actually executes with repository context. Major tags drift silently: a new major is never
+  # picked up on its own, and nothing in the repository records that one exists.
+  - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      # One PR per week for all action bumps rather than one per action — they are almost
+      # always independent and individually trivial, and reviewing them together is faster.
+      actions:
+        patterns: ["*"]

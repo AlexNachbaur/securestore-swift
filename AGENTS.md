@@ -6,12 +6,17 @@ Instructions for AI agents working in the securestore-swift repository itself. I
 
 ## What this package is
 
-A cross-platform secure-credential store: one `SecureStore` protocol (set, read, remove, removeAll, `keys(withPrefix:)`), a Keychain Services backend
-for Apple, and a host-registered C-bridge backend for platforms without a Swift-native secure
-store (Android). Swift 6.3+, one library target, no dependencies.
+A cross-platform secure-credential store: one `SecureStore` protocol (set, read, remove,
+removeAll, `keys(withPrefix:)`) and four backends, selected at compile time — Keychain Services
+on Apple, Credential Manager on Windows, the freedesktop.org Secret Service on Linux, and a
+host-registered C bridge for platforms with no Swift-reachable store (Android). Swift 6.3+, one
+library target plus the `CSecret` system-library shim.
 
-Keeping it dependency-free is deliberate — it is linked into credential paths on multiple
-platforms. Do not add a dependency without raising it first.
+The only external dependency is libsecret, and it is scoped to Linux by a
+`.when(platforms: [.linux])` condition on the target dependency — that condition is load-bearing,
+because without it `libsecret-1-dev` becomes a build requirement on every platform. This package
+is linked into credential paths on multiple platforms; do not add another dependency, or widen
+that condition, without raising it first.
 
 ## Non-negotiable design rules
 
@@ -25,7 +30,11 @@ passes.
 3. **No heap pointers cross the C boundary.** Results come back through sink callbacks that copy
    within the call's lifetime. Never return a malloc'd buffer for the other side to free.
 4. **Every C operation returns a status.** `0` ok, `1` not found, anything else a host error
-   surfaced verbatim in `SecureStoreError.platform(code:)`.
+   surfaced verbatim in `SecureStoreError.platform`. A host may additionally register a
+   describer (`securestore_register_host_describer`) to turn its codes into text.
+4a. **Failures carry context, not just a number.** `SecureStoreError.platform` wraps a
+   `PlatformFailure` (backend, operation, code, message, domain). Every backend resolves the
+   platform's own message; a new one that does not is incomplete.
 5. **Callbacks are non-capturing `@convention(c)`.** Per-call state travels through the explicit
    `context` pointer. This is what makes them safe from JNI.
 6. **The C ABI is a compatibility surface.** Additive callbacks are fine; changing an existing

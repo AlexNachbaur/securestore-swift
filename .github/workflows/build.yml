@@ -10,67 +10,140 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# swift-tools-version is 6.3, so every runner must provide Swift 6.3 or newer — an older
-# toolchain cannot even parse the manifest. That means macos-26 (Xcode 26.x) rather than
-# macos-15/Xcode 16.4, and the swift:6.3 container rather than swift:6.1.
+# Nothing here writes to the repository.
+permissions:
+  contents: read
+
+env:
+  # swift-tools-version is 6.3, so every runner needs 6.3 or newer — an older toolchain cannot
+  # parse the manifest. Hence macos-26 (Xcode 26.x) and the swift:6.3 container.
+  SWIFT_VERSION: "6.3"
+
+# `lint` gates everything: it takes seconds on the cheapest runner, and a formatting failure
+# blocks a merge just as surely as a compile failure.
+#
+# The platform jobs then fan out in PARALLEL, unlike the sibling repositories where Linux gates
+# the rest. Each platform here runs a different backend — Keychain, Credential Manager, Secret
+# Service, host bridge — so a Linux failure predicts nothing about Windows, and chaining them
+# would serialise the discovery of unrelated bugs across separate CI rounds.
 jobs:
-  macos:
-    name: Build & Test (macOS)
-    runs-on: macos-26
-    env:
-      DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
-    steps:
-      - uses: actions/checkout@v6
-
-      # The package has no dependencies, so there is nothing to fetch — this caches the
-      # compiled build products, which is where the time actually goes on a small package.
-      - name: Cache SwiftPM
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/Library/Caches/org.swift.swiftpm
-            .build
-          key: ${{ runner.os }}-spm-${{ hashFiles('Package.swift', 'Sources/**', 'Tests/**') }}
-          restore-keys: |
-            ${{ runner.os }}-spm-
-
-      - name: Show toolchain
-        run: swift --version
-
-      - name: Build
-        run: swift build
-
-      # Exercises KeychainSecureStore against the real Keychain, not a stub.
-      - name: Test
-        run: swift test
-
-  android:
-    name: Build & Test (Android)
-    runs-on: ubuntu-latest
-    # Gated behind lint + macOS rather than run in parallel. The Android job boots an emulator and
-    # is the slowest thing here, so spending it on a commit that already failed a cheaper, faster
-    # check is waste. Both suites assert the same contract, so an Apple failure almost always means
-    # Android would fail too — running them concurrently just pays twice for one bug. Costs some
-    # wall-clock on a passing run; saves the emulator run on every failing one.
-    needs: [lint, macos]
-    steps:
-      - uses: actions/checkout@v6
-
-      # Runs the same contract suite in an emulator, so the host path — the C ABI, its sink
-      # callbacks, and the status codes — is executed rather than merely compiled. The action
-      # manages its own toolchain/SDK/NDK caching.
-      - name: Build and test on Android emulator
-        uses: skiptools/swift-android-action@v2
-        with:
-          swift-version: '6.3.3'
-          android-api-level: 28
-          free-disk-space: true
-
   lint:
     name: Lint
     runs-on: ubuntu-latest
     container: swift:6.3
     steps:
-      - uses: actions/checkout@v6
-      - name: swift-format
-        run: swift format lint --strict --recursive Sources Tests Package.swift
+      - uses: actions/checkout@v7
+      - run: swift format lint --strict --recursive Sources Tests Package.swift
+
+  linux:
+    name: Build & Test (Linux)
+    needs: lint
+    runs-on: ubuntu-latest
+    container: swift:6.3
+    env:
+      # Keeps scratch keyring state on container-local storage rather than GitHub's
+      # bind-mounted HOME.
+      XDG_DATA_HOME: /tmp/xdg-data
+    steps:
+      - uses: actions/checkout@v7
+
+      # libsecret-1-dev supplies the headers and pkg-config file CSecret resolves against;
+      # gnome-keyring is the Secret Service provider the tests talk to; dbus-x11 supplies
+      # dbus-run-session; libsecret-tools supplies the secret-tool probe.
+      - name: Install libsecret and a Secret Service provider
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq pkg-config libsecret-1-dev libsecret-tools gnome-keyring dbus-x11
+
+      - run: swift --version
+      - run: swift build
+
+      # See .github/scripts/run-linux-tests.sh — standing up a headless Secret Service has a
+      # race in it that is worth reading about before touching this.
+      - name: Test
+        run: dbus-run-session -- .github/scripts/run-linux-tests.sh
+
+  macos:
+    name: Build & Test (macOS)
+    needs: lint
+    runs-on: macos-26
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v7
+
+      # No SwiftPM dependencies to fetch, so this caches build products — where the time
+      # actually goes on a package this size.
+      - name: Cache SwiftPM
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/Library/Caches/org.swift.swiftpm
+            .build
+          key: macos-spm-${{ hashFiles('Package.swift', 'Sources/**', 'Tests/**') }}
+          restore-keys: macos-spm-
+
+      - run: swift --version
+      - run: swift build
+
+      # Exercises KeychainSecureStore against the real Keychain, not a stub.
+      - run: swift test
+
+  ios:
+    # Build only, and named so — this job does NOT assert behaviour.
+    #
+    # A SwiftPM test bundle has no host application, so the simulator grants it no keychain
+    # entitlement and every Keychain call fails with -34018 (errSecMissingEntitlement).
+    # CODE_SIGN_ENTITLEMENTS with ad-hoc signing does not help; it was tried. Real iOS
+    # assertions need a checked-in .xcodeproj with a host app target, tracked separately.
+    #
+    # It still earns its place: an iOS-only availability annotation, a Security API absent on
+    # iOS, or a linkage mistake fails here and nowhere else.
+    name: Build (iOS Simulator)
+    needs: lint
+    runs-on: macos-26
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build for testing
+        run: |
+          xcodebuild build-for-testing \
+            -scheme securestore-swift \
+            -destination 'platform=iOS Simulator,name=iPhone 17,OS=latest'
+
+  windows:
+    name: Build & Test (Windows)
+    needs: lint
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # The only maintained action that installs a Swift toolchain on all three host platforms,
+      # and it wires up the MSVC environment Swift needs here. It publishes no moving major tag,
+      # so this is pinned exactly and left to Dependabot.
+      - uses: SwiftyLab/setup-swift@v1.14.0
+        with:
+          swift-version: ${{ env.SWIFT_VERSION }}
+
+      - run: swift --version
+      - run: swift build
+
+      # Exercises WindowsSecureStore against the real Credential Manager.
+      - run: swift test
+
+  android:
+    name: Build & Test (Android)
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Runs the suite in an emulator rather than only cross-compiling, so the host bridge — the
+      # C ABI, its sink callbacks, the describer — is executed rather than merely compiled.
+      - name: Build and test on Android emulator
+        uses: skiptools/swift-android-action@v2
+        with:
+          swift-version: 6.3.3
+          android-api-level: 28
+          free-disk-space: true
