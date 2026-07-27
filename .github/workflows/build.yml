@@ -19,18 +19,20 @@ permissions:
 # toolchain cannot even parse the manifest. That means macos-26 (Xcode 26.x) and the swift:6.3
 # container.
 #
-# Job topology is three tiers, deliberately serial at the top:
+# Job topology is two tiers:
 #
-#   lint  ->  linux  ->  { macos, ios, windows, android }
+#   lint  ->  { linux, macos, ios, windows, android }
 #
 # `lint` is the canary: it takes seconds on the cheapest runner, and a formatting failure blocks
 # a merge just as surely as a compile failure does, so nothing else should start until it passes.
-# `linux` is the second gate for the same reason — it is the cheapest runner that builds and runs
-# the whole suite (GitHub bills Linux at 1x, Windows at 2x and macOS at 10x), so a commit that
-# does not compile is rejected before an expensive or slow runner is spent on it. The Android job
-# is cheap per-minute but by far the slowest, since it boots an emulator, so it sits in the same
-# tier. Every backend asserts the same contract, so a failure in one is usually a failure in all
-# — running them concurrently just pays several times over for one bug.
+#
+# Below that the platform jobs fan out in parallel, unlike the sibling repositories where Linux
+# gates the rest. The difference is deliberate and specific to this package: each platform runs
+# a *different backend* — Keychain, Credential Manager, Secret Service, host bridge — so a Linux
+# failure predicts nothing about Windows. Chaining them here would serialise the discovery of
+# unrelated bugs across separate CI rounds, which is exactly what happened while this branch was
+# being written: three consecutive Linux failures meant WindowsSecureStore was never compiled
+# once. Paying for the whole fan-out is worth finding all of it in one round.
 jobs:
   lint:
     name: Lint
@@ -69,8 +71,8 @@ jobs:
       #   1. A session bus. gnome-keyring is reached over D-Bus, so `dbus-run-session` wraps
       #      everything that has to share it — the daemon, the probe, and the test run.
       #   2. An unlocked login keyring. `--unlock` reads a password from stdin and creates the
-      #      keyring if absent; the password is empty because this is scratch state in a
-      #      throwaway container. `--components=secrets` skips the ssh and pkcs11 agents.
+      #      keyring if absent, provided the password is non-empty (see below).
+      #      `--components=secrets` skips the ssh and pkcs11 agents.
       #   3. A `default` collection alias. This is the part that is easy to miss: the Secret
       #      Service resolves SECRET_COLLECTION_DEFAULT through this file, and a fresh
       #      container has no keyrings directory at all. Without it, libsecret asks the daemon
@@ -82,7 +84,12 @@ jobs:
         run: |
           cat > /tmp/run-tests.sh <<'SCRIPT'
           set -euo pipefail
-          eval "$(echo -n "" | gnome-keyring-daemon --unlock --components=secrets)"
+          # A NON-EMPTY password is required. With an empty one the daemon treats the keyring as
+          # having no password and never creates login.keyring, which leaves the default alias
+          # below pointing at nothing — "Object does not exist at path
+          # /org/freedesktop/secrets/collection/login". The value itself is irrelevant: this is
+          # scratch state in a throwaway container, not a secret.
+          eval "$(printf 'securestore-ci' | gnome-keyring-daemon --unlock --components=secrets)"
           export GNOME_KEYRING_CONTROL
 
           # Prove the environment before blaming the code. secret-tool is libsecret's own
@@ -100,7 +107,7 @@ jobs:
 
   macos:
     name: Build & Test (macOS)
-    needs: linux
+    needs: lint
     runs-on: macos-26
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
@@ -143,7 +150,7 @@ jobs:
     # not exist on iOS, or a linkage mistake all fail here and nowhere else. macOS remains the
     # job that asserts Keychain behaviour.
     name: Build (iOS Simulator)
-    needs: linux
+    needs: lint
     runs-on: macos-26
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
@@ -157,7 +164,7 @@ jobs:
 
   windows:
     name: Build & Test (Windows)
-    needs: linux
+    needs: lint
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -182,7 +189,7 @@ jobs:
 
   android:
     name: Build & Test (Android)
-    needs: linux
+    needs: lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

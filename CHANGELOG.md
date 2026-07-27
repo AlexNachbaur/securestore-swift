@@ -18,9 +18,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   libsecret. Items land in the user's default collection and searches unlock it on demand, so a
   locked keyring prompts rather than reading as empty.
 - **`CSecret`** — a `.systemLibrary` target wrapping `<libsecret/secret.h>` through pkg-config.
+- **`PlatformFailure`** — the payload of `SecureStoreError.platform`, carrying the backend, the
+  operation, the platform's own code, its message, and its error domain, with a
+  `CustomStringConvertible` that renders all of it on one line. Every backend now resolves the
+  platform's text: `SecCopyErrorMessageString` on Apple, `FormatMessageW` on Windows, the
+  `GError` message and domain on Linux.
+- **`securestore_register_host_describer`** — an optional C entry point letting an Android host
+  translate its own status codes into messages, through the same sink convention the rest of
+  the ABI uses. Deliberately a **new symbol** rather than a parameter on
+  `securestore_register_host`: adding a parameter would change an existing signature and break
+  every host already compiled against it. A host that never calls it is unaffected.
 
 ### Changed
 
+- **⚠️ `SecureStoreError.platform` changed shape**, from `case platform(code: Int32)` to
+  `case platform(PlatformFailure)`. Existing `catch SecureStoreError.platform(let code)` sites
+  become `catch let SecureStoreError.platform(failure)`, with the code at `failure.code`. The
+  old case could not answer which store failed or what was being attempted, and discarded any
+  message the platform supplied — which is how a container with no Secret Service collection
+  presented as `.platform(code: 19)` on writes while reads of absent keys succeeded, reading as
+  a backend bug rather than the environment problem it was.
 - **The host bridge is now Android-only.** `HostSecureStore`, `SecureStoreHostCallbacks`,
   `registerSecureStoreHost` and the `securestore_register_host` C entry point were gated
   `#if !canImport(Security)`, so they compiled on Windows and Linux; they are now
@@ -39,7 +56,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     signing does not work around it. Running the contract suite on iOS would require checking
     an `.xcodeproj` with a host app target into a pure-SwiftPM package. macOS remains the job
     that asserts Keychain behaviour.
-- The lint job now gates every other job, and the Linux job gates the expensive runners.
+- The lint job gates every other job. Unlike the sibling repositories, the platform jobs then
+  fan out in parallel rather than chaining behind Linux: each platform here runs a *different
+  backend*, so a Linux failure predicts nothing about Windows, and chaining serialised the
+  discovery of unrelated bugs across separate CI rounds.
 - Dependabot now watches the `github-actions` ecosystem. The `swift` ecosystem was removed: the
   package has no SwiftPM dependencies, so it had nothing to do and read as coverage that did not
   exist.

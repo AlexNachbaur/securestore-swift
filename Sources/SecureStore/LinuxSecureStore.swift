@@ -77,12 +77,28 @@
 
     /// Translates a `GError` into a `SecureStoreError`, freeing it.
     ///
-    /// `code` is the domain-specific error number the Secret Service returned, kept verbatim so a
-    /// bug report can be traced back to a specific D-Bus failure rather than a generic one.
-    private func consume(_ error: UnsafeMutablePointer<GError>) -> SecureStoreError {
-        let code = error.pointee.code
-        g_error_free(error)
-        return .platform(code: Int32(code))
+    /// Both the message and the domain are carried across, and neither is optional detail here.
+    /// A Secret Service call can fail through libsecret, GIO, or D-Bus, and those are separate
+    /// code spaces — the same number means different things in each, so a bare code is not even
+    /// unambiguous, let alone actionable. The message is frequently the entire diagnosis: a
+    /// container with no default collection reports "Object does not exist at path
+    /// /org/freedesktop/secrets/collection/login", which names the fix.
+    private func consume(
+        _ error: UnsafeMutablePointer<GError>,
+        _ operation: PlatformFailure.Operation
+    ) -> SecureStoreError {
+        defer { g_error_free(error) }
+        let message = error.pointee.message.map { String(cString: $0) }
+        let domain = g_quark_to_string(error.pointee.domain).map { String(cString: $0) }
+        return .platform(
+            PlatformFailure(
+                backend: .secretService,
+                operation: operation,
+                code: Int32(error.pointee.code),
+                message: message,
+                domain: domain
+            )
+        )
     }
 
     // MARK: - Store
@@ -161,14 +177,26 @@
                         nil,
                         &error
                     )
-                    if let error { throw consume(error) }
-                    guard stored != 0 else { throw SecureStoreError.platform(code: 0) }
+                    if let error { throw consume(error, .set) }
+                    guard stored != 0 else {
+                        // libsecret reports failure through the GError, so a false return with
+                        // no error should be unreachable. Surfacing it anyway beats returning
+                        // as though the write succeeded.
+                        throw SecureStoreError.platform(
+                            PlatformFailure(
+                                backend: .secretService,
+                                operation: .set,
+                                code: 0,
+                                message: "libsecret reported failure without an error"
+                            )
+                        )
+                    }
                 }
             }
         }
 
         public func data(for key: String) throws -> Data? {
-            let items = try search(key: key, loadSecrets: true)
+            let items = try search(key: key, loadSecrets: true, for: .read)
             defer { g_list_free_full(items, { g_object_unref($0) }) }
 
             // No match is `nil`, not an error. Anything that could not be read has already
@@ -189,15 +217,15 @@
         }
 
         public func remove(_ key: String) throws {
-            try clear(key: key)
+            try clear(key: key, for: .remove)
         }
 
         public func removeAll() throws {
-            try clear(key: nil)
+            try clear(key: nil, for: .removeAll)
         }
 
         public func keys(withPrefix prefix: String) throws -> [String] {
-            let items = try search(key: nil, loadSecrets: false)
+            let items = try search(key: nil, loadSecrets: false, for: .listKeys)
             defer { g_list_free_full(items, { g_object_unref($0) }) }
 
             var keys: [String] = []
@@ -228,7 +256,11 @@
         /// `SECRET_SEARCH_ALL` returns every match rather than just the first, and
         /// `SECRET_SEARCH_UNLOCK` unlocks the collection on demand so a locked keyring surfaces
         /// as a prompt or an error instead of an empty result.
-        private func search(key: String?, loadSecrets: Bool) throws -> UnsafeMutablePointer<GList>? {
+        private func search(
+            key: String?,
+            loadSecrets: Bool,
+            for operation: PlatformFailure.Operation
+        ) throws -> UnsafeMutablePointer<GList>? {
             var flags = SECRET_SEARCH_ALL.rawValue | SECRET_SEARCH_UNLOCK.rawValue
             if loadSecrets { flags |= SECRET_SEARCH_LOAD_SECRETS.rawValue }
 
@@ -242,7 +274,7 @@
                     nil,
                     &error
                 )
-                if let error { throw consume(error) }
+                if let error { throw consume(error, operation) }
                 return items
             }
         }
@@ -251,11 +283,11 @@
         ///
         /// `secret_service_clear_sync` returns false when nothing matched, which is not a
         /// failure: absent is the caller's desired end state, matching every other backend.
-        private func clear(key: String?) throws {
+        private func clear(key: String?, for operation: PlatformFailure.Operation) throws {
             try withAttributes(key: key) { attributes in
                 var error: UnsafeMutablePointer<GError>?
                 _ = secret_service_clear_sync(nil, nil, attributes, nil, &error)
-                if let error { throw consume(error) }
+                if let error { throw consume(error, operation) }
             }
         }
     }

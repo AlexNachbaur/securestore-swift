@@ -54,12 +54,54 @@
         }
     }
 
+    /// The system's own text for a Win32 error code, or `nil` if it has none.
+    ///
+    /// `FORMAT_MESSAGE_FROM_SYSTEM` is the OS's message table, so this matches what every other
+    /// Windows tool reports for the same code. `IGNORE_INSERTS` is required: without it,
+    /// messages containing insert sequences expect an argument list and the call fails.
+    ///
+    /// A fixed buffer is used rather than `FORMAT_MESSAGE_ALLOCATE_BUFFER` because the latter
+    /// returns a heap pointer to free via `LocalFree`, and the pointer arrives through a
+    /// deliberately mistyped out-parameter — needless risk for a message that never approaches
+    /// this length.
+    private func systemMessage(for code: DWORD) -> String? {
+        var buffer = [WCHAR](repeating: 0, count: 512)
+        let length = buffer.withUnsafeMutableBufferPointer { buffer -> DWORD in
+            guard let base = buffer.baseAddress else { return 0 }
+            return FormatMessageW(
+                DWORD(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS),
+                nil,
+                code,
+                0,
+                base,
+                DWORD(buffer.count),
+                nil
+            )
+        }
+        guard length > 0 else { return nil }
+
+        // System messages are conventionally terminated with CRLF, which is noise in a
+        // single-line error description.
+        let text = String(decodingCString: buffer, as: UTF16.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
+    }
+
     /// Wraps the calling thread's last Win32 error as a `SecureStoreError`.
     ///
     /// `GetLastError` is `DWORD`; the bit pattern is preserved rather than clamped so a report
-    /// can be traced back to the exact `ERROR_*` value.
-    private func lastError() -> SecureStoreError {
-        .platform(code: Int32(bitPattern: GetLastError()))
+    /// can be traced back to the exact `ERROR_*` value. It is read exactly once — every
+    /// subsequent Win32 call, including the one that formats the message, would overwrite it.
+    private func lastError(_ operation: PlatformFailure.Operation) -> SecureStoreError {
+        let code = GetLastError()
+        return .platform(
+            PlatformFailure(
+                backend: .credentialManager,
+                operation: operation,
+                code: Int32(bitPattern: code),
+                message: systemMessage(for: code)
+            )
+        )
     }
 
     // MARK: - Store
@@ -129,7 +171,7 @@
                     )
                 }
             }
-            guard written else { throw lastError() }
+            guard written else { throw lastError(.set) }
         }
 
         /// The `CredWriteW` call itself. `CredWriteW` replaces an existing credential with the
@@ -158,7 +200,7 @@
                 // A missing item is `nil`, never an error — the distinction the whole package
                 // exists to preserve.
                 if GetLastError() == ERROR_NOT_FOUND { return nil }
-                throw lastError()
+                throw lastError(.read)
             }
             guard let credential else { throw SecureStoreError.invalidData }
             defer { CredFree(credential) }
@@ -179,24 +221,25 @@
             guard deleted else {
                 // Absent is the caller's desired end state, matching every other backend.
                 if GetLastError() == ERROR_NOT_FOUND { return }
-                throw lastError()
+                throw lastError(.remove)
             }
         }
 
         public func removeAll() throws {
-            for name in try targetNames(matchingKeyPrefix: "") {
+            for name in try targetNames(matchingKeyPrefix: "", for: .removeAll) {
                 let deleted = withWideString(name) { target in
                     CredDeleteW(target, DWORD(CRED_TYPE_GENERIC), 0)
                 }
                 // A concurrent deleter winning the race leaves the desired end state anyway.
                 if !deleted, GetLastError() != ERROR_NOT_FOUND {
-                    throw lastError()
+                    throw lastError(.removeAll)
                 }
             }
         }
 
         public func keys(withPrefix prefix: String) throws -> [String] {
-            try targetNames(matchingKeyPrefix: prefix).compactMap(key(fromTargetName:))
+            try targetNames(matchingKeyPrefix: prefix, for: .listKeys)
+                .compactMap(key(fromTargetName:))
         }
 
         // MARK: - Enumeration
@@ -208,7 +251,10 @@
         /// machine. The results are re-checked in Swift regardless: the documented filter syntax
         /// says nothing about an asterisk appearing *inside* the prefix, which a caller's key
         /// could contain, and a backend that over-matched would hand one store another's items.
-        private func targetNames(matchingKeyPrefix keyPrefix: String) throws -> [String] {
+        private func targetNames(
+            matchingKeyPrefix keyPrefix: String,
+            for operation: PlatformFailure.Operation
+        ) throws -> [String] {
             let filter = targetPrefix + escape(keyPrefix) + "*"
 
             var count: DWORD = 0
@@ -221,7 +267,7 @@
                 // No match at all is reported as a failure with ERROR_NOT_FOUND, not as an empty
                 // set, so it has to be translated back into one.
                 if GetLastError() == ERROR_NOT_FOUND { return [] }
-                throw lastError()
+                throw lastError(operation)
             }
             guard let credentials else { return [] }
             defer { CredFree(credentials) }

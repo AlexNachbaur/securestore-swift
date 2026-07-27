@@ -17,8 +17,10 @@
     //      the callback's lifetime and the host frees its buffer as soon as the call returns.
     //      Ownership never crosses, so there is nothing to leak and nothing to free twice.
     //   2. EVERY OPERATION RETURNS AN Int32 STATUS. `SecureStoreStatus.ok` means success;
-    //      anything else is surfaced as `SecureStoreError.platform(code:)` carrying the host's
-    //      own code, so a failure can be traced to a specific platform error.
+    //      anything else is surfaced as `SecureStoreError.platform` carrying the host's own
+    //      code, so a failure can be traced to a specific platform error. A host that also
+    //      registers a describer (see `securestore_register_host_describer`) gets its own text
+    //      carried alongside the code.
     //
     // The sink takes an opaque `context` pointer because `@convention(c)` functions cannot
     // capture — which is precisely the property that makes them safe to hand to JNI.
@@ -42,6 +44,26 @@
     public typealias SecureStoreKeySink =
         @convention(c) (
             _ context: UnsafeMutableRawPointer?, _ key: UnsafePointer<CChar>?
+        ) -> Void
+
+    /// Receives a human-readable description of a status code. Valid only for the duration of
+    /// the call.
+    ///
+    /// Structurally identical to `SecureStoreKeySink`, and deliberately a separate name: the two
+    /// carry different things, and a host reading the header should not have to infer which from
+    /// the parameter position.
+    public typealias SecureStoreMessageSink =
+        @convention(c) (
+            _ context: UnsafeMutableRawPointer?, _ message: UnsafePointer<CChar>?
+        ) -> Void
+
+    /// Turns one of the host's own status codes into a message, through the sink.
+    ///
+    /// Optional. A host that does not register one still reports failures — they simply carry a
+    /// number and no text, which is what every host did before this existed.
+    public typealias SecureStoreHostDescriber =
+        @convention(c) (
+            _ status: Int32, _ context: UnsafeMutableRawPointer?, _ sink: SecureStoreMessageSink
         ) -> Void
 
     /// The C functions a host installs to service secure storage.
@@ -121,6 +143,56 @@
         registeredCallbacks.withLock { $0 = callbacks }
     }
 
+    /// Holds the host's optional describer. Separate from the callback table so that
+    /// registering one is genuinely additive: a host built against the older ABI links and runs
+    /// unchanged, and simply reports failures without text.
+    private let registeredDescriber = Mutex<SecureStoreHostDescriber?>(nil)
+
+    /// Installs a translator from the host's status codes to human-readable messages.
+    ///
+    /// Optional, and independent of `registerSecureStoreHost` — call it or don't. Without it a
+    /// host failure carries only a number, which is meaningful to whoever wrote the host and
+    /// opaque to everyone else reading a bug report.
+    public func registerSecureStoreHostDescriber(_ describer: @escaping SecureStoreHostDescriber) {
+        registeredDescriber.withLock { $0 = describer }
+    }
+
+    /// C entry point a JNI shim calls to install the describer.
+    ///
+    /// Added after `securestore_register_host`, as a *new* symbol rather than a parameter on the
+    /// existing one: changing that signature would break every host already compiled against it.
+    @_cdecl("securestore_register_host_describer")
+    public func securestoreRegisterHostDescriber(_ describer: @escaping SecureStoreHostDescriber) {
+        registerSecureStoreHostDescriber(describer)
+    }
+
+    /// Asks the registered describer what `status` means, or `nil` if none is registered.
+    private func hostMessage(for status: Int32) -> String? {
+        guard let describer = registeredDescriber.withLock({ $0 }) else { return nil }
+        var captured: String?
+        withUnsafeMutablePointer(to: &captured) { context in
+            describer(status, UnsafeMutableRawPointer(context)) { context, message in
+                guard let context, let message else { return }
+                context.assumingMemoryBound(to: String?.self).pointee = String(cString: message)
+            }
+        }
+        return captured
+    }
+
+    /// Wraps a host status as a `SecureStoreError`, with the host's own text where available.
+    private func hostFailure(_ status: Int32, _ operation: PlatformFailure.Operation)
+        -> SecureStoreError
+    {
+        .platform(
+            PlatformFailure(
+                backend: .host,
+                operation: operation,
+                code: status,
+                message: hostMessage(for: status)
+            )
+        )
+    }
+
     /// C entry point a JNI shim calls to install the host implementation.
     @_cdecl("securestore_register_host")
     public func securestoreRegisterHost(
@@ -178,9 +250,9 @@
             }
         }
 
-        private func check(_ status: Int32) throws {
+        private func check(_ status: Int32, _ operation: PlatformFailure.Operation) throws {
             guard status == SecureStoreStatus.ok else {
-                throw SecureStoreError.platform(code: status)
+                throw hostFailure(status, operation)
             }
         }
 
@@ -205,7 +277,7 @@
                     }
                 }
             }
-            try check(status)
+            try check(status, .set)
         }
 
         public func data(for key: String) throws -> Data? {
@@ -233,7 +305,7 @@
                 }
             }
             if status == SecureStoreStatus.notFound { return nil }
-            try check(status)
+            try check(status, .read)
             return captured
         }
 
@@ -242,16 +314,16 @@
             let status = withIdentity { service, namespace in
                 key.withCString { host.remove(service, namespace, $0) }
             }
-            // Absent is the caller's desired end state, matching the Apple backend.
+            // Absent is the caller's desired end state, matching every native backend.
             if status == SecureStoreStatus.notFound { return }
-            try check(status)
+            try check(status, .remove)
         }
 
         public func removeAll() throws {
             let host = try callbacks()
             let status = withIdentity { host.removeAll($0, $1) }
             if status == SecureStoreStatus.notFound { return }
-            try check(status)
+            try check(status, .removeAll)
         }
 
         public func keys(withPrefix prefix: String) throws -> [String] {
@@ -268,7 +340,7 @@
                 }
             }
             if status == SecureStoreStatus.notFound { return [] }
-            try check(status)
+            try check(status, .listKeys)
             return captured
         }
     }

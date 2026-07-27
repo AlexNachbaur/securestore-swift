@@ -83,10 +83,35 @@ ceilings (Windows caps a credential blob at `CRED_MAX_CREDENTIAL_BLOB_SIZE`, 2,5
 |---|---|
 | `0` | Success |
 | `1` | No such item. **Not an error** for reads or removals |
-| other | Host failure, surfaced as `SecureStoreError.platform(code:)` |
+| other | Host failure, surfaced as `SecureStoreError.platform(PlatformFailure)` |
 
 Reporting the host's own code verbatim matters in the field: a support report can be traced to a
 specific platform error rather than a generic "keychain failed".
+
+### Rule 2a — describing a status (optional)
+
+A code alone is meaningful to whoever wrote the host and opaque to everyone else. The native
+backends do better — Apple resolves an `OSStatus` through `SecCopyErrorMessageString`, Windows
+through `FormatMessageW`, Linux carries libsecret's own `GError` message — and a host can too:
+
+```c
+void securestore_register_host_describer(
+    void (*describe)(int32_t status,
+                     void *context,
+                     void (*sink)(void *context, const char *message)));
+```
+
+The text comes back through a sink, following Rule 1 exactly as `get` and `keys` do — the host
+keeps ownership and Swift copies within the call.
+
+**This is a separate symbol, not a parameter added to `securestore_register_host`.** Adding a
+parameter would change an existing signature and break every host already compiled against it,
+which the compatibility rule forbids. A new entry point is additive: a host that never calls it
+links and runs unchanged, and its failures simply carry a code and no text — exactly the
+behaviour that existed before this was added.
+
+Registering a describer is optional and independent of registering the callback table; there is
+no ordering requirement between them.
 
 ### Rule 3 — callbacks cannot capture
 

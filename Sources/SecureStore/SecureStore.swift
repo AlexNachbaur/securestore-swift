@@ -75,16 +75,95 @@ public struct SecureStoreConfiguration: Sendable, Equatable {
 /// A failure from the underlying secure store.
 public enum SecureStoreError: Error, Equatable, Sendable {
 
-    /// The platform store reported a failure. `code` is the raw platform status —
-    /// an `OSStatus` on Apple, the host's own status elsewhere — kept so a bug report can be
-    /// traced back to a specific platform error rather than a generic one.
-    case platform(code: Int32)
+    /// The platform store reported a failure. See ``PlatformFailure``.
+    case platform(PlatformFailure)
 
     /// Stored bytes could not be read back as data.
     case invalidData
 
     /// No backend has been registered yet on a host that requires one.
     ///
-    /// Only reachable off Apple, and only before the host calls its registration entry point.
+    /// Only reachable on hosts served by the C bridge, and only before the host calls its
+    /// registration entry point.
     case backendNotRegistered
+}
+
+/// A failure reported by the platform's own store, with the context needed to act on it.
+///
+/// A bare status code is not enough. It does not say which store produced it, so the same
+/// number means different things on different platforms; it does not say what was being
+/// attempted, so a write failure is indistinguishable from an enumeration failure; and it
+/// throws away any message the platform supplied. That combination is not hypothetical — a
+/// missing Secret Service collection surfaces as writes failing while reads of absent keys
+/// succeed, which reads as a backend bug until you find the message that says otherwise.
+public struct PlatformFailure: Error, Equatable, Sendable, CustomStringConvertible {
+
+    /// Which platform store reported the failure.
+    ///
+    /// Present because `code` is only meaningful alongside it: `-25300` is a Keychain
+    /// `errSecItemNotFound`, `1168` is a Windows `ERROR_NOT_FOUND`, and a host backend's codes
+    /// are whatever that host chose.
+    public enum Backend: String, Equatable, Sendable {
+        case keychain = "Keychain Services"
+        case credentialManager = "Credential Manager"
+        case secretService = "Secret Service"
+        case host = "host backend"
+    }
+
+    /// Which `SecureStore` operation was in flight.
+    public enum Operation: String, Equatable, Sendable {
+        case set
+        case read
+        case remove
+        case removeAll = "removeAll"
+        case listKeys = "key enumeration"
+    }
+
+    public let backend: Backend
+    public let operation: Operation
+
+    /// The raw platform status: an `OSStatus` on Apple, a Win32 error on Windows, a `GError`
+    /// code on Linux, or the host's own status through the C bridge.
+    public let code: Int32
+
+    /// The platform's own description, where it offers one.
+    ///
+    /// `nil` when the platform has no message to give — notably a host backend that has not
+    /// registered a describer, since the C bridge carries only a status code by itself.
+    public let message: String?
+
+    /// The error domain the code belongs to, where the platform namespaces its codes.
+    ///
+    /// Populated on Linux from the `GError` domain, because a Secret Service failure may come
+    /// from libsecret, GIO, or D-Bus, and the same number means different things in each.
+    /// `nil` on platforms with a single code space.
+    public let domain: String?
+
+    public init(
+        backend: Backend,
+        operation: Operation,
+        code: Int32,
+        message: String? = nil,
+        domain: String? = nil
+    ) {
+        self.backend = backend
+        self.operation = operation
+        self.code = code
+        self.message = message
+        self.domain = domain
+    }
+
+    /// One line carrying everything above, for a log or a bug report.
+    public var description: String {
+        var text = "\(backend.rawValue) \(operation.rawValue) failed"
+        if let domain {
+            text += " (\(domain), code \(code))"
+        } else {
+            text += " (code \(code))"
+        }
+        if let message, !message.isEmpty {
+            text += ": \(message)"
+        }
+        return text
+    }
 }

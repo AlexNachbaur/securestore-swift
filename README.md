@@ -39,6 +39,11 @@ SecureStore solves that without dragging a Java-interop layer into your Swift co
 - **Errors are errors.** Every operation throws, including reads. A credential that is missing
   because the item was locked is a very different situation from one that was never written, and
   the API refuses to conflate them.
+- **A failure says what actually happened.** `SecureStoreError.platform` carries a
+  `PlatformFailure` with the backend, the operation, the platform's own code, its message, and
+  its error domain — so `print(error)` gives you something like *"Secret Service set failed
+  (g-io-error-quark, code 19): Object does not exist at path
+  /org/freedesktop/secrets/collection/login"* rather than a bare number you have to go look up.
 - **The host owns the Android implementation.** Swift never links a Java SDK; you register C
   callbacks once at startup.
 
@@ -137,6 +142,19 @@ Two rules govern that ABI, and they are what make it safe:
 Until a host registers, every operation throws `SecureStoreError.backendNotRegistered`. That is
 deliberate: a store that silently appears to work while persisting nothing is far worse than a
 loud failure.
+
+A host may **optionally** register a describer, so its status codes reach callers as text
+instead of bare numbers — the same quality of error the native backends give:
+
+```c
+void securestore_register_host_describer(
+    void (*describe)(int32_t status,
+                     void *context,
+                     void (*sink)(void *context, const char *message)));
+```
+
+It is a separate entry point rather than an extra parameter on `securestore_register_host`,
+so a host compiled before it existed keeps working untouched.
 
 See [docs/design/host-bridge-abi.md](docs/design/host-bridge-abi.md) for the full contract.
 

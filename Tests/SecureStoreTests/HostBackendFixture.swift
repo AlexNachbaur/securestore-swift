@@ -28,9 +28,17 @@
         return service + "|" + String(cString: namespace)
     }
 
+    /// Writing this key makes the fixture fail. An in-memory backend cannot fail on its own, so
+    /// without a way to force one the error path — the whole point of the describer — would be
+    /// unreachable from a test.
+    let hostBackendFixtureFailingKey = "force-failure"
+
     private let hostSet: SecureStoreHostCallbacks.SetFn = { service, namespace, key, bytes, length in
-        let scopeKey = scope(service, namespace)
         let itemKey = String(cString: key)
+        guard itemKey != hostBackendFixtureFailingKey else {
+            return hostBackendFixtureFailureStatus
+        }
+        let scopeKey = scope(service, namespace)
         let value = Data(bytes: bytes, count: Int(length))
         storage.withLock { $0[scopeKey, default: [:]][itemKey] = value }
         return SecureStoreStatus.ok
@@ -75,11 +83,31 @@
         return SecureStoreStatus.ok
     }
 
+    /// The status the fixture returns for `hostBackendFixtureFailingKey`.
+    let hostBackendFixtureFailureStatus: Int32 = 42
+
+    /// The text the describer produces for that status.
+    let hostBackendFixtureFailureMessage = "fixture failure"
+
+    /// Translates the fixture's status codes, through the real describer entry point.
+    ///
+    /// Registered by the fixture so the suite can hold the *same* error-quality bar on Android
+    /// that the native backends meet — otherwise the one backend reached by third parties would
+    /// be the one nothing asserts.
+    private let hostDescribe: SecureStoreHostDescriber = { status, context, sink in
+        let text =
+            status == hostBackendFixtureFailureStatus
+            ? hostBackendFixtureFailureMessage
+            : "unknown host status \(status)"
+        text.withCString { sink(context, $0) }
+    }
+
     enum HostBackendFixture {
 
-        /// Registers the fixture through the public C entry point. Idempotent.
+        /// Registers the fixture through the public C entry points. Idempotent.
         static func install() {
             securestoreRegisterHost(hostSet, hostGet, hostRemove, hostRemoveAll, hostKeys)
+            securestoreRegisterHostDescriber(hostDescribe)
         }
 
         static func reset() {
