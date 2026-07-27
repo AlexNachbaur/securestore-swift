@@ -6,33 +6,26 @@ on:
   pull_request:
     branches: [main]
 
-# Superseded runs on the same branch are pointless once a newer commit exists.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Nothing here writes to the repository; the default token permissions are wider than needed.
+# Nothing here writes to the repository.
 permissions:
   contents: read
 
-# swift-tools-version is 6.3, so every runner must provide Swift 6.3 or newer — an older
-# toolchain cannot even parse the manifest. That means macos-26 (Xcode 26.x) and the swift:6.3
-# container.
+env:
+  # swift-tools-version is 6.3, so every runner needs 6.3 or newer — an older toolchain cannot
+  # parse the manifest. Hence macos-26 (Xcode 26.x) and the swift:6.3 container.
+  SWIFT_VERSION: "6.3"
+
+# `lint` gates everything: it takes seconds on the cheapest runner, and a formatting failure
+# blocks a merge just as surely as a compile failure.
 #
-# Job topology is two tiers:
-#
-#   lint  ->  { linux, macos, ios, windows, android }
-#
-# `lint` is the canary: it takes seconds on the cheapest runner, and a formatting failure blocks
-# a merge just as surely as a compile failure does, so nothing else should start until it passes.
-#
-# Below that the platform jobs fan out in parallel, unlike the sibling repositories where Linux
-# gates the rest. The difference is deliberate and specific to this package: each platform runs
-# a *different backend* — Keychain, Credential Manager, Secret Service, host bridge — so a Linux
-# failure predicts nothing about Windows. Chaining them here would serialise the discovery of
-# unrelated bugs across separate CI rounds, which is exactly what happened while this branch was
-# being written: three consecutive Linux failures meant WindowsSecureStore was never compiled
-# once. Paying for the whole fan-out is worth finding all of it in one round.
+# The platform jobs then fan out in PARALLEL, unlike the sibling repositories where Linux gates
+# the rest. Each platform here runs a different backend — Keychain, Credential Manager, Secret
+# Service, host bridge — so a Linux failure predicts nothing about Windows, and chaining them
+# would serialise the discovery of unrelated bugs across separate CI rounds.
 jobs:
   lint:
     name: Lint
@@ -40,89 +33,35 @@ jobs:
     container: swift:6.3
     steps:
       - uses: actions/checkout@v7
-      - name: swift-format
-        run: swift format lint --strict --recursive Sources Tests Package.swift
+      - run: swift format lint --strict --recursive Sources Tests Package.swift
 
   linux:
     name: Build & Test (Linux)
     needs: lint
     runs-on: ubuntu-latest
     container: swift:6.3
+    env:
+      # Keeps scratch keyring state on container-local storage rather than GitHub's
+      # bind-mounted HOME.
+      XDG_DATA_HOME: /tmp/xdg-data
     steps:
       - uses: actions/checkout@v7
 
-      # libsecret-1-dev supplies the headers and pkg-config file the CSecret target resolves
-      # against. gnome-keyring is the Secret Service *provider* the tests actually talk to, and
-      # dbus-x11 supplies dbus-run-session.
+      # libsecret-1-dev supplies the headers and pkg-config file CSecret resolves against;
+      # gnome-keyring is the Secret Service provider the tests talk to; dbus-x11 supplies
+      # dbus-run-session; libsecret-tools supplies the secret-tool probe.
       - name: Install libsecret and a Secret Service provider
         run: |
           apt-get update -qq
           apt-get install -y -qq pkg-config libsecret-1-dev libsecret-tools gnome-keyring dbus-x11
 
-      - name: Show toolchain
-        run: swift --version
+      - run: swift --version
+      - run: swift build
 
-      - name: Build
-        run: swift build
-
-      # Exercises LinuxSecureStore against a real Secret Service, not a stub.
-      #
-      # The wait loop is the load-bearing part, and the bug it fixes is a race that CI loses and
-      # a developer machine usually wins — which is exactly why it survived several rounds of
-      # "obviously correct" incantations.
-      #
-      # `gnome-keyring-daemon --daemonize` RETURNS BEFORE IT HAS CLAIMED org.freedesktop.secrets.
-      # Measured in a container: NameHasOwner is false immediately after the call returns and
-      # true about two seconds later. Anything that talks to the Secret Service inside that
-      # window does not reach this daemon at all — D-Bus instead *activates* a second
-      # gnome-keyring-daemon, which never received the password, cannot read the keyring the
-      # first one wrote ("keyring was in an invalid or unrecognized format"), and falls back to
-      # a prompter that cannot run headless.
-      #
-      # So: wait for the name, and fail loudly if it never appears rather than proceeding into a
-      # misleading pile of test failures.
-      #
-      # The password is empty and newline-terminated: empty so the keyring auto-unlocks,
-      # newline-terminated or the daemon never creates it at all. XDG_DATA_HOME keeps the
-      # keyring on container-local storage rather than GitHub's bind-mounted HOME — hygiene
-      # rather than a fix, but it keeps scratch state off a mount shared with the host.
+      # See .github/scripts/run-linux-tests.sh — standing up a headless Secret Service has a
+      # race in it that is worth reading about before touching this.
       - name: Test
-        env:
-          XDG_DATA_HOME: /tmp/xdg-data
-        run: |
-          mkdir -p "$XDG_DATA_HOME"
-          cat > /tmp/run-tests.sh <<'SCRIPT'
-          set -uo pipefail
-          eval "$(printf '\n' | gnome-keyring-daemon --daemonize --unlock --components=secrets)"
-
-          owned=""
-          for _ in $(seq 1 60); do
-              owned=$(dbus-send --session --dest=org.freedesktop.DBus --print-reply \
-                  /org/freedesktop/DBus org.freedesktop.DBus.NameHasOwner \
-                  string:org.freedesktop.secrets 2>/dev/null | tail -1 | grep -o 'true')
-              [ "$owned" = "true" ] && break
-              sleep 0.5
-          done
-          if [ "$owned" != "true" ]; then
-              echo "::error::gnome-keyring never claimed org.freedesktop.secrets"
-              exit 1
-          fi
-
-          # Prove the environment before blaming the code. secret-tool is libsecret's own
-          # client, so if this fails the container is misconfigured and LinuxSecureStore has
-          # not been reached yet — which is worth knowing before reading 14 test failures.
-          if ! echo probe | secret-tool store --label=probe securestore-ci probe; then
-              echo "::error::No usable Secret Service. Keyring directory contains:"
-              ls -la "$XDG_DATA_HOME/keyrings" || echo "  (no keyrings directory)"
-              exit 1
-          fi
-          secret-tool clear securestore-ci probe
-          echo "Secret Service is reachable and writable."
-
-          set -e
-          swift test
-          SCRIPT
-          dbus-run-session -- bash /tmp/run-tests.sh
+        run: dbus-run-session -- .github/scripts/run-linux-tests.sh
 
   macos:
     name: Build & Test (macOS)
@@ -133,8 +72,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # The package has no SwiftPM dependencies, so there is nothing to fetch — this caches the
-      # compiled build products, which is where the time actually goes on a small package.
+      # No SwiftPM dependencies to fetch, so this caches build products — where the time
+      # actually goes on a package this size.
       - name: Cache SwiftPM
         uses: actions/cache@v6
         with:
@@ -144,30 +83,22 @@ jobs:
           key: macos-spm-${{ hashFiles('Package.swift', 'Sources/**', 'Tests/**') }}
           restore-keys: macos-spm-
 
-      - name: Show toolchain
-        run: swift --version
-
-      - name: Build
-        run: swift build
+      - run: swift --version
+      - run: swift build
 
       # Exercises KeychainSecureStore against the real Keychain, not a stub.
-      - name: Test
-        run: swift test
+      - run: swift test
 
   ios:
-    # Build only, and named so — this job does NOT assert behaviour, and should not be read as
-    # if it did.
+    # Build only, and named so — this job does NOT assert behaviour.
     #
-    # Running the contract suite here is not currently possible. A SwiftPM test bundle has no
-    # host application, so the simulator grants it no keychain entitlement and every Keychain
-    # Services call fails with -34018 (errSecMissingEntitlement). Supplying
+    # A SwiftPM test bundle has no host application, so the simulator grants it no keychain
+    # entitlement and every Keychain call fails with -34018 (errSecMissingEntitlement).
     # CODE_SIGN_ENTITLEMENTS with ad-hoc signing does not help; it was tried. Real iOS
-    # assertions would require checking in an .xcodeproj with a host app target, which is
-    # tracked separately.
+    # assertions need a checked-in .xcodeproj with a host app target, tracked separately.
     #
-    # It still earns its place: an iOS-only availability annotation, a Security API that does
-    # not exist on iOS, or a linkage mistake all fail here and nowhere else. macOS remains the
-    # job that asserts Keychain behaviour.
+    # It still earns its place: an iOS-only availability annotation, a Security API absent on
+    # iOS, or a linkage mistake fails here and nowhere else.
     name: Build (iOS Simulator)
     needs: lint
     runs-on: macos-26
@@ -187,24 +118,19 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
-      # SwiftyLab/setup-swift is the only maintained action that installs a Swift toolchain on
-      # all three host platforms, and it wires up the MSVC environment Swift needs on Windows.
-      # It publishes no moving major tag, so this is pinned to an exact release and left to
-      # Dependabot's github-actions ecosystem to bump.
+
+      # The only maintained action that installs a Swift toolchain on all three host platforms,
+      # and it wires up the MSVC environment Swift needs here. It publishes no moving major tag,
+      # so this is pinned exactly and left to Dependabot.
       - uses: SwiftyLab/setup-swift@v1.14.0
         with:
-          swift-version: '6.3'
+          swift-version: ${{ env.SWIFT_VERSION }}
 
-      - name: Show toolchain
-        run: swift --version
+      - run: swift --version
+      - run: swift build
 
-      - name: Build
-        run: swift build
-
-      # Exercises WindowsSecureStore against the real Credential Manager. The runner's user
-      # profile provides the credential set; no service needs starting.
-      - name: Test
-        run: swift test
+      # Exercises WindowsSecureStore against the real Credential Manager.
+      - run: swift test
 
   android:
     name: Build & Test (Android)
@@ -213,12 +139,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # Runs the same contract suite in an emulator, so the host path — the C ABI, its sink
-      # callbacks, and the status codes — is executed rather than merely compiled. The action
-      # manages its own toolchain/SDK/NDK caching.
+      # Runs the suite in an emulator rather than only cross-compiling, so the host bridge — the
+      # C ABI, its sink callbacks, the describer — is executed rather than merely compiled.
       - name: Build and test on Android emulator
         uses: skiptools/swift-android-action@v2
         with:
-          swift-version: '6.3.3'
+          swift-version: 6.3.3
           android-api-level: 28
           free-disk-space: true
