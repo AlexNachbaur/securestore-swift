@@ -55,7 +55,7 @@ jobs:
       - name: Install libsecret and a Secret Service provider
         run: |
           apt-get update -qq
-          apt-get install -y -qq pkg-config libsecret-1-dev gnome-keyring dbus-x11
+          apt-get install -y -qq pkg-config libsecret-1-dev libsecret-tools gnome-keyring dbus-x11
 
       - name: Show toolchain
         run: swift --version
@@ -64,17 +64,39 @@ jobs:
         run: swift build
 
       # Exercises LinuxSecureStore against a real Secret Service, not a stub — which means one
-      # has to exist. gnome-keyring needs a session bus and an unlocked login keyring;
-      # `--unlock` reads a password from stdin and creates the keyring if it is absent. The
-      # password is empty because this keyring is scratch state in a throwaway container, and
-      # `--components=secrets` keeps the daemon from also starting the ssh and pkcs11 agents.
+      # has to exist, and standing one up in a headless container takes three things:
+      #
+      #   1. A session bus. gnome-keyring is reached over D-Bus, so `dbus-run-session` wraps
+      #      everything that has to share it — the daemon, the probe, and the test run.
+      #   2. An unlocked login keyring. `--unlock` reads a password from stdin and creates the
+      #      keyring if absent; the password is empty because this is scratch state in a
+      #      throwaway container. `--components=secrets` skips the ssh and pkcs11 agents.
+      #   3. A `default` collection alias. This is the part that is easy to miss: the Secret
+      #      Service resolves SECRET_COLLECTION_DEFAULT through this file, and a fresh
+      #      container has no keyrings directory at all. Without it, libsecret asks the daemon
+      #      to create a collection, the daemon tries to activate a prompter to ask the user,
+      #      and in a container that activation fails. The symptom is not an obvious
+      #      environment error — every write fails while reads of absent keys still "pass" by
+      #      correctly returning nothing, which reads like a backend bug.
       - name: Test
         run: |
-          dbus-run-session -- bash -c '
-            eval "$(echo -n "" | gnome-keyring-daemon --unlock --components=secrets)"
-            export GNOME_KEYRING_CONTROL
-            swift test
-          '
+          cat > /tmp/run-tests.sh <<'SCRIPT'
+          set -euo pipefail
+          eval "$(echo -n "" | gnome-keyring-daemon --unlock --components=secrets)"
+          export GNOME_KEYRING_CONTROL
+
+          # Prove the environment before blaming the code. secret-tool is libsecret's own
+          # client, so if this fails the container is misconfigured and LinuxSecureStore has
+          # not been reached yet — which is worth knowing before reading 14 test failures.
+          echo probe | secret-tool store --label=probe securestore-ci probe
+          secret-tool clear securestore-ci probe
+          echo "Secret Service is reachable and writable."
+
+          swift test
+          SCRIPT
+          mkdir -p "$HOME/.local/share/keyrings"
+          printf 'login' > "$HOME/.local/share/keyrings/default"
+          dbus-run-session -- bash /tmp/run-tests.sh
 
   macos:
     name: Build & Test (macOS)
