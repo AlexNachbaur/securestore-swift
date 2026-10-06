@@ -27,16 +27,16 @@ CI runs the suite in an Android emulator, so a change that only compiles will st
 ## Before opening a pull request
 
 ```bash
-swift format --in-place --recursive Sources Tests Package.swift
-swift format lint --strict --recursive Sources Tests Package.swift
-swift test
+make format   # swift format --in-place --recursive Sources Tests Package.swift
+make check    # lint, build, test
 ```
 
 ## What a good change looks like
 
 **Behaviour goes in the contract suite.** `Tests/SecureStoreTests/SecureStoreContractTests.swift`
-is deliberately not platform-guarded: it runs against Keychain Services on Apple and against a
-host-registered in-memory backend elsewhere. If you are changing what a store *does*, assert it
+is deliberately not platform-guarded: it runs against Keychain Services on Apple, Credential
+Manager on Windows, a real Secret Service on Linux, and a host-registered in-memory backend on
+Android. If you are changing what a store *does*, assert it
 there so every backend is held to it. Backend-specific tests are for backend-specific mechanics
 only.
 

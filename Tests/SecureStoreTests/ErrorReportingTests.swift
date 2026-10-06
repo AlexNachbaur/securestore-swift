@@ -75,6 +75,55 @@ struct PlatformFailureTests {
         let failure = PlatformFailure(backend: .keychain, operation: .listKeys, code: 1)
         #expect(failure.description == "Keychain Services key enumeration failed (code 1)")
     }
+
+    @Test("Every operation renders under a stable name")
+    func operationNamesAreStable() {
+        // `removeAll` once spelled its raw value out by hand. It is now implicit, and this is
+        // what holds the rendered text still if the case is ever renamed.
+        #expect(PlatformFailure.Operation.set.rawValue == "set")
+        #expect(PlatformFailure.Operation.read.rawValue == "read")
+        #expect(PlatformFailure.Operation.remove.rawValue == "remove")
+        #expect(PlatformFailure.Operation.removeAll.rawValue == "removeAll")
+        #expect(PlatformFailure.Operation.listKeys.rawValue == "key enumeration")
+    }
+
+    // MARK: - localizedDescription (portable)
+    //
+    // Most logging and alert code reaches for `localizedDescription`, not `description`. Without
+    // a `LocalizedError` conformance Foundation answers with "The operation couldn’t be
+    // completed" and a type name, which throws away everything the failure carries.
+
+    @Test("localizedDescription carries the failure, whether or not it is wrapped")
+    func localizedDescriptionCarriesContext() {
+        let failure = PlatformFailure(
+            backend: .credentialManager,
+            operation: .read,
+            code: 1168,
+            message: "Element not found."
+        )
+        let expected = "Credential Manager read failed (code 1168): Element not found."
+
+        #expect(failure.localizedDescription == expected)
+        #expect(SecureStoreError.platform(failure).localizedDescription == expected)
+        // Through an existential, which is how a `catch` block actually sees it.
+        let erased: any Error = SecureStoreError.platform(failure)
+        #expect(erased.localizedDescription == expected)
+    }
+
+    @Test("The cases with no platform failure still describe themselves")
+    func localizedDescriptionCoversEveryCase() {
+        let invalidData: any Error = SecureStoreError.invalidData
+        let notRegistered: any Error = SecureStoreError.backendNotRegistered
+
+        #expect(
+            invalidData.localizedDescription
+                == "The secure store returned a value that could not be read back as data"
+        )
+        #expect(
+            notRegistered.localizedDescription
+                == "No secure-store backend has been registered by the host"
+        )
+    }
 }
 
 // MARK: - Configuration
@@ -98,9 +147,24 @@ struct SecureStoreConfigurationTests {
         #expect(SecureStoreConfiguration(service: "s", namespace: "team.shared").namespace == "team.shared")
     }
 
-    // MARK: - Real failures (platform-specific)
+}
 
-    #if os(Windows)
+// MARK: - Real failures (platform-specific)
+
+// Failures forced out of a real backend, as opposed to the rendering of one built by hand.
+//
+// Their own suites rather than a section of the configuration tests, where these used to sit: a
+// failing run should say that a backend stopped reporting its errors, not that
+// `SecureStoreConfiguration` is broken.
+//
+// There is no Keychain or Secret Service suite, because neither can be made to fail on demand
+// without damaging the developer's real store: a healthy keychain accepts any write this
+// package can express, and locking a keyring from a test would leave it locked.
+
+#if os(Windows)
+
+    @Suite("Credential Manager failures")
+    struct CredentialManagerFailureTests {
 
         @Test("A Credential Manager failure carries the system's own message")
         func windowsFailureCarriesSystemMessage() throws {
@@ -123,10 +187,14 @@ struct SecureStoreConfigurationTests {
                 #expect(!message.isEmpty)
             }
         }
+    }
 
-    #endif
+#endif
 
-    #if !canImport(Security) && !os(Windows) && !os(Linux)
+#if !canImport(Security) && !os(Windows) && !os(Linux)
+
+    @Suite("Host backend failures")
+    struct HostBackendFailureTests {
 
         @Test("A host failure carries the message the host's describer produced")
         func hostFailureCarriesDescribedMessage() throws {
@@ -146,12 +214,12 @@ struct SecureStoreConfigurationTests {
             }
         }
 
-    // There is deliberately no test for the "host registered no describer" path. Asserting
-    // it would need a way to clear the registry, and adding one purely for a test would put
-    // a footgun in the public API of a credential store — a call that silently degrades
-    // every subsequent error. The guarantee is structural instead: the describer lives in
-    // its own registry defaulted to nil, behind its own C symbol, so a host built before it
-    // existed neither calls it nor links against it.
+        // There is deliberately no test for the "host registered no describer" path. Asserting
+        // it would need a way to clear the registry, and adding one purely for a test would put
+        // a footgun in the public API of a credential store — a call that silently degrades
+        // every subsequent error. The guarantee is structural instead: the describer lives in
+        // its own registry defaulted to nil, behind its own C symbol, so a host built before it
+        // existed neither calls it nor links against it.
+    }
 
-    #endif
-}
+#endif

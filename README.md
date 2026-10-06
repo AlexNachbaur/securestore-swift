@@ -41,9 +41,10 @@ SecureStore solves that without dragging a Java-interop layer into your Swift co
   the API refuses to conflate them.
 - **A failure says what actually happened.** `SecureStoreError.platform` carries a
   `PlatformFailure` with the backend, the operation, the platform's own code, its message, and
-  its error domain — so `print(error)` gives you something like *"Secret Service set failed
-  (g-io-error-quark, code 19): Object does not exist at path
+  its error domain — so `error.localizedDescription` gives you something like *"Secret Service
+  set failed (g-io-error-quark, code 19): Object does not exist at path
   /org/freedesktop/secrets/collection/login"* rather than a bare number you have to go look up.
+  (`print(error)` shows the same text wrapped in the case name, `platform(…)`.)
 - **The host owns the Android implementation.** Swift never links a Java SDK; you register C
   callbacks once at startup.
 
@@ -64,7 +65,7 @@ SecureStore solves that without dragging a Java-interop layer into your Swift co
 ```swift
 import SecureStore
 
-let store = KeychainSecureStore(service: "com.example.auth")
+let store = PlatformSecureStore(service: "com.example.auth")
 
 try store.set(Data(token.utf8), for: "session")
 
@@ -75,24 +76,31 @@ if let data = try store.data(for: "session") {
 try store.remove("session")
 ```
 
-To stay platform-agnostic, depend on the protocol and construct the concrete store once:
+`PlatformSecureStore` is a typealias for whichever backend the platform you are compiling for
+has — `KeychainSecureStore` on Apple, `WindowsSecureStore` on Windows, `LinuxSecureStore` on
+Linux, `HostSecureStore` everywhere else — so shared code never has to spell out the `#if`
+itself. To stay platform-agnostic, depend on the protocol and construct the concrete store once:
 
 ```swift
 func makeStore(service: String) -> any SecureStore {
-    #if canImport(Security)
-        KeychainSecureStore(service: service)
-    #elseif os(Windows)
-        WindowsSecureStore(service: service)
-    #elseif os(Linux)
-        LinuxSecureStore(service: service)
-    #else
-        HostSecureStore(service: service)
-    #endif
+    PlatformSecureStore(service: service)
 }
 ```
 
-Exactly one backend type exists per platform, so the branch that compiles is the only correct
-one — there is no runtime selection and nothing to configure.
+Exactly one backend type exists per platform, so there is no runtime selection and nothing to
+configure. The concrete names remain available for code that is platform-specific anyway and
+wants to say so.
+
+### Calls block
+
+Every operation is synchronous and takes as long as the platform does. That is normally
+microseconds, but a locked Linux keyring raises an unlock prompt and the call does not return
+until the user answers it; a macOS keychain can prompt too, and a host backend is as fast as the
+host made it. There is no timeout and no cancellation, so keep store calls off the main actor:
+
+```swift
+let token = try await Task.detached { try store.data(for: "session") }.value
+```
 
 ### Sharing between processes
 
@@ -105,6 +113,26 @@ KeychainSecureStore(service: "com.example.auth", namespace: "TEAMID.com.example.
 
 Hosts with no equivalent concept ignore it. Design your key layout so that a host which cannot
 share is still correct — just less convenient.
+
+**On macOS, `namespace` is ignored by default.** macOS has two keychains. The default is the
+file-based login keychain, which disregards the access group and the accessibility class: two
+stores that differ only in `namespace` read and overwrite each other's items there. The *data
+protection* keychain — the only one iOS has — enforces both, and is opt-in:
+
+```swift
+KeychainSecureStore(
+    service: "com.example.auth",
+    namespace: "TEAMID.com.example.shared",
+    usesDataProtectionKeychain: true
+)
+```
+
+It is not the default because it needs a keychain entitlement: a signed app (or a tool with
+`keychain-access-groups`) has one, while `swift run`, `swift test`, and unsigned command-line
+tools do not and get `errSecMissingEntitlement` (-34018) on every call — thrown, never a silent
+fallback. The two keychains do not share items, so turning the flag on for a shipped macOS app
+means migrating: read from a store without it, write to one with it. The flag changes nothing
+on iOS, tvOS, watchOS, or visionOS.
 
 ## Android
 
@@ -148,7 +176,7 @@ Two rules govern that ABI, and they are what make it safe:
    }
    ```
 
-   Register a describer (above) and `failure.message` carries your own text instead of `nil`.
+   Register a describer (below) and `failure.message` carries your own text instead of `nil`.
 
 Until a host registers, every operation throws `SecureStoreError.backendNotRegistered`. That is
 deliberate: a store that silently appears to work while persisting nothing is far worse than a
@@ -167,7 +195,18 @@ void securestore_register_host_describer(
 It is a separate entry point rather than an extra parameter on `securestore_register_host`,
 so a host compiled before it existed keeps working untouched.
 
-See [docs/design/host-bridge-abi.md](docs/design/host-bridge-abi.md) for the full contract.
+Three details of the ABI that the signatures do not show, and that a JNI shim has to get right:
+
+- **Strings are standard UTF-8**, in both directions. JNI's `NewStringUTF` and
+  `GetStringUTFChars` speak *Modified* UTF-8, which differs for any character outside the Basic
+  Multilingual Plane — convert through `byte[]` and `StandardCharsets.UTF_8` instead.
+- **Callbacks arrive on whichever thread called the store**, which may not be attached to the
+  JVM. Attach it before touching a `JNIEnv`.
+- **No function pointer may be `NULL`.** Only `namespace_` can be.
+
+See [docs/design/host-bridge-abi.md](docs/design/host-bridge-abi.md) for the full contract, and
+[docs/design/securestore_host.h](docs/design/securestore_host.h) for a C header declaring both
+entry points that you can copy into a shim.
 
 ## Requirements
 
@@ -195,12 +234,19 @@ Two platform-specific notes worth knowing before you depend on this:
 ## Testing
 
 The behavioural contract is written once and run against whichever backend the platform provides,
-so Apple and Android cannot drift:
+so the four backends cannot drift:
 
 ```bash
-swift test                                              # Apple, against the real Keychain
-swift test --swift-sdk aarch64-unknown-linux-android28  # Android, in an emulator
+swift test                                               # the platform you are on
+swift build --build-tests \
+    --swift-sdk aarch64-unknown-linux-android28          # Android: cross-compiles the suite
 ```
+
+`swift test` runs against the real store — the Keychain on macOS, Credential Manager on Windows,
+a Secret Service provider on Linux — scoped to a unique service per run and emptied afterwards.
+The Android line only cross-compiles: the resulting test binary has to be pushed to an emulator
+or device to run, which is what CI does on every change, against an in-memory host registered
+through the real C entry point.
 
 That suite already earned its keep: it caught that `SecItemDelete` deletes *one* matching item on
 the macOS legacy keychain but *all* of them on iOS — a `removeAll` that silently left items

@@ -21,6 +21,37 @@
         )
     }
 
+    /// Writes an item that may or may not already exist, returning the final `OSStatus`.
+    ///
+    /// Keychain Services has no upsert, so a write is an add that falls back to an update when
+    /// the item is already there. Those are two calls, and another process — an app and its
+    /// extensions share a store — can delete the item between them: the add reports a
+    /// duplicate, the update then finds nothing, and a write to a store that is perfectly
+    /// healthy would fail with `errSecItemNotFound`. When that happens the item is known to be
+    /// absent, so the add is tried once more.
+    ///
+    /// Once, not until it succeeds: losing the same race twice in a row means something is
+    /// deleting this key continuously, and reporting that beats spinning on it.
+    ///
+    /// The two calls are parameters so the interleaving can be asserted directly. A real
+    /// keychain cannot be made to lose this race on demand.
+    func keychainUpsert(add: () -> OSStatus, update: () -> OSStatus) -> OSStatus {
+        var status = errSecSuccess
+        for _ in 0..<2 {
+            status = add()
+            guard status == errSecDuplicateItem else { return status }
+            status = update()
+            guard status == errSecItemNotFound else { return status }
+        }
+        return status
+    }
+
+    /// The backend `SecureStore` resolves to on this platform. See ``KeychainSecureStore``.
+    ///
+    /// Each backend file defines this under its own compile-time gate. The four gates are
+    /// mutually exclusive and exhaustive, so exactly one definition exists in any build.
+    public typealias PlatformSecureStore = KeychainSecureStore
+
     /// `SecureStore` over Apple Keychain Services.
     ///
     /// Items are `kSecClassGenericPassword`, keyed by service + account, which is the shape a
@@ -29,16 +60,71 @@
     /// Accessibility is `kSecAttrAccessibleAfterFirstUnlock` so credentials remain readable
     /// while the device is locked. That is required, not incidental — the notification service
     /// extension performs delta sync from a locked device and needs its token.
+    ///
+    /// ## macOS has two keychains, and only one honors `namespace`
+    ///
+    /// iOS, tvOS, watchOS, and visionOS have a single keychain — the *data protection*
+    /// keychain — where the access group and the accessibility class are enforced. macOS also
+    /// has the older *file-based* keychain (`login.keychain-db`), and it is the default there.
+    /// The file-based keychain **ignores both attributes**: an item written with one
+    /// `namespace` reads back under any other, or under none, and no accessibility class is
+    /// recorded. Two stores that differ only in `namespace` are therefore the same store on
+    /// macOS unless ``usesDataProtectionKeychain`` is set.
+    ///
+    /// The default cannot simply be flipped: the data protection keychain is available only to
+    /// a process signed with a keychain entitlement (an app, or a tool with
+    /// `keychain-access-groups`). An unsigned process — `swift run`, `swift test`, a plain
+    /// command-line tool — is refused with `errSecMissingEntitlement` (-34018) on every call.
     public struct KeychainSecureStore: SecureStore {
 
         private let configuration: SecureStoreConfiguration
 
-        public init(_ configuration: SecureStoreConfiguration) {
+        /// Whether items live in the data protection keychain rather than the macOS
+        /// file-based one.
+        ///
+        /// Set this on macOS when `namespace` isolation or the accessibility class has to be
+        /// real — see the type's discussion. It has no effect on iOS, tvOS, watchOS, or
+        /// visionOS, which have no other keychain.
+        ///
+        /// Two consequences worth knowing before turning it on:
+        ///
+        /// - The process must hold a keychain entitlement. Without one, every operation throws
+        ///   ``SecureStoreError/platform(_:)`` carrying `errSecMissingEntitlement` (-34018) —
+        ///   loudly, rather than falling back to the file-based keychain.
+        /// - The two keychains do not share items. A store created with this set does not see
+        ///   what the same service wrote without it, so changing the value on a shipped macOS
+        ///   app needs a migration: read from the old store, write to the new one.
+        public let usesDataProtectionKeychain: Bool
+
+        /// Creates a store over the items identified by `configuration`.
+        ///
+        /// Nothing is read or written until the first operation, so this cannot fail.
+        ///
+        /// - Parameters:
+        ///   - configuration: The service and namespace identifying the store.
+        ///   - usesDataProtectionKeychain: See ``usesDataProtectionKeychain``. Off by default,
+        ///     because an unentitled macOS process cannot use that keychain at all.
+        public init(_ configuration: SecureStoreConfiguration, usesDataProtectionKeychain: Bool = false) {
             self.configuration = configuration
+            self.usesDataProtectionKeychain = usesDataProtectionKeychain
         }
 
-        public init(service: String, namespace: String? = nil) {
-            self.init(SecureStoreConfiguration(service: service, namespace: namespace))
+        /// Creates a store for `service`, optionally scoped to `namespace`.
+        ///
+        /// `service` becomes the keychain service attribute and `namespace` the keychain access
+        /// group. See ``SecureStoreConfiguration`` for how an empty namespace is treated. On
+        /// macOS the access group is honored only when `usesDataProtectionKeychain` is `true`.
+        ///
+        /// - Parameters:
+        ///   - service: The keychain service attribute.
+        ///   - namespace: The keychain access group, or `nil` for the process's default.
+        ///   - usesDataProtectionKeychain: See ``usesDataProtectionKeychain``. Off by default,
+        ///     because an unentitled macOS process cannot use that keychain at all.
+        public init(service: String, namespace: String? = nil, usesDataProtectionKeychain: Bool = false) {
+            self.init(
+                SecureStoreConfiguration(service: service, namespace: namespace),
+                usesDataProtectionKeychain: usesDataProtectionKeychain
+            )
         }
 
         // MARK: - SecureStore
@@ -51,19 +137,15 @@
             attributes[kSecValueData as String] = data
             attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
 
-            let addStatus = SecItemAdd(attributes as CFDictionary, nil)
-            if addStatus == errSecSuccess { return }
-
-            guard addStatus == errSecDuplicateItem else {
-                throw keychainFailure(addStatus, .set)
-            }
-
-            let updateStatus = SecItemUpdate(
-                baseQuery(for: key) as CFDictionary,
-                [kSecValueData as String: data] as CFDictionary
+            let query = baseQuery(for: key)
+            let status = keychainUpsert(
+                add: { SecItemAdd(attributes as CFDictionary, nil) },
+                update: {
+                    SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+                }
             )
-            guard updateStatus == errSecSuccess else {
-                throw keychainFailure(updateStatus, .set)
+            guard status == errSecSuccess else {
+                throw keychainFailure(status, .set)
             }
         }
 
@@ -143,6 +225,12 @@
             ]
             if let namespace = configuration.namespace {
                 query[kSecAttrAccessGroup as String] = namespace
+            }
+            // Part of the store's identity, so it rides on every query: the same service names
+            // different items in each keychain. Only ever set to true — an explicit `false`
+            // is not the same as absent on every OS version.
+            if usesDataProtectionKeychain {
+                query[kSecUseDataProtectionKeychain as String] = true
             }
             return query
         }
