@@ -54,6 +54,19 @@ breaking change. The rules in [docs/design/host-bridge-abi.md](docs/design/host-
 no heap pointers across the boundary, status codes for errors, non-capturing callbacks — are
 requirements, not suggestions.
 
+## Code review
+
+Every pull request gets an automated review from Claude (`.github/workflows/claude-review.yml`),
+which posts inline comments. `main` requires every review thread to be resolved before a merge:
+fix what the comment describes, or reply with why it does not apply, then resolve it. A thread
+resolved without either is reopened.
+
+The review needs a secret that only this repository holds, so a pull request **from a fork** is
+not reviewed automatically — a maintainer adds the `claude-review` label once they have looked
+at the submission, which runs the review (and re-runs it on later pushes). Your fork's own copy
+of the workflow skips itself, and the review is not a required check, so nothing about this
+blocks you from building, testing, or opening the pull request.
+
 ## Reporting bugs
 
 Use the [issue templates](https://github.com/AlexNachbaur/securestore-swift/issues/new/choose).
