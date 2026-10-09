@@ -273,6 +273,10 @@
     private struct HostReadResult {
         var data: Data?
         var malformed = false
+        /// How many times the sink was invoked. The ABI says exactly once for an item that
+        /// exists; a second call means the host is confused about which value it returned,
+        /// and "last write wins" would quietly pick one.
+        var sinkCalls = 0
     }
 
     /// The length of a value as the C ABI carries it, or a thrown failure if it does not fit.
@@ -388,6 +392,7 @@
                         host.get(service, namespace, key, UnsafeMutableRawPointer(context)) { context, bytes, length in
                             guard let context else { return }
                             let target = context.assumingMemoryBound(to: HostReadResult.self)
+                            target.pointee.sinkCalls += 1
                             // A negative length describes no value at all. Reading it as empty
                             // would turn a host bug into a plausible stored credential.
                             guard length >= 0 else {
@@ -422,7 +427,7 @@
             // `nil` here instead would report a host that forgot to call back — or that failed
             // inside its own lookup and still returned 0 — as a missing item: the signed-out
             // user this package exists to prevent.
-            guard !result.malformed, let data = result.data else {
+            guard !result.malformed, result.sinkCalls == 1, let data = result.data else {
                 throw SecureStoreError.invalidData
             }
             return data

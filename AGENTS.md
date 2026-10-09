@@ -102,7 +102,8 @@ passes.
   `SecureStoreConfiguration`). The macOS file-based keychain ignores the access group and
   accessibility class, but the data protection keychain needs an entitlement that `swift test`
   and unsigned tools lack, so it cannot be the default. With the flag set and no entitlement
-  the store throws `errSecMissingEntitlement`; it must never fall back.
+  writes throw `errSecMissingEntitlement` and reads see an empty keychain (Security answers
+  them with "not found", not an error); it must never fall back.
 - **The registry is `Mutex`-guarded and not shared across capabilities.** Registration lands
   on the host's startup thread while operations arrive from arbitrary concurrency contexts. It
   is ~20 lines, and callback signatures differ enough between domains that a shared abstraction

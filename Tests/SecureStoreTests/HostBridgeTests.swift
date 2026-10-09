@@ -50,6 +50,17 @@
             }
         }
 
+        /// The ABI says the sink is called exactly once for an item that exists. A host that
+        /// calls it twice has lost track of which value it stored; picking the last one would
+        /// hand the caller a credential the host never meant to return.
+        @Test("Calling the sink twice throws, rather than keeping the last value")
+        func doubleSinkIsNotLastWriteWins() {
+            let store = makeStore("double-sink")
+            #expect(throws: SecureStoreError.invalidData) {
+                try store.data(for: hostBackendFixtureDoubleSinkKey)
+            }
+        }
+
         /// A missing item still has to be `nil` — the checks above must not have turned every
         /// sink-less return into an error.
         @Test("Not-found without the sink being called is still nil")

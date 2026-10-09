@@ -41,6 +41,8 @@
     let hostBackendFixtureSilentSinkKey = "force-ok-without-sink"
     let hostBackendFixtureNegativeLengthKey = "force-negative-length"
     let hostBackendFixtureNullBufferKey = "force-null-buffer"
+    /// Calls the sink twice with different values — a host that cannot decide which it stored.
+    let hostBackendFixtureDoubleSinkKey = "force-double-sink"
 
     private let hostSet: SecureStoreHostCallbacks.SetFn = { service, namespace, key, bytes, length in
         let itemKey = String(cString: key)
@@ -66,6 +68,14 @@
         }
         if itemKey == hostBackendFixtureNullBufferKey {
             sink(context, nil, 4)
+            return SecureStoreStatus.ok
+        }
+        if itemKey == hostBackendFixtureDoubleSinkKey {
+            for value in [Data("first".utf8), Data("second".utf8)] {
+                value.withUnsafeBytes { buffer in
+                    sink(context, buffer.bindMemory(to: UInt8.self).baseAddress, Int32(value.count))
+                }
+            }
             return SecureStoreStatus.ok
         }
         guard let value = storage.withLock({ $0[scopeKey]?[itemKey] }) else {

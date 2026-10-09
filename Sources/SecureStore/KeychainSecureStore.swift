@@ -74,7 +74,8 @@
     /// The default cannot simply be flipped: the data protection keychain is available only to
     /// a process signed with a keychain entitlement (an app, or a tool with
     /// `keychain-access-groups`). An unsigned process — `swift run`, `swift test`, a plain
-    /// command-line tool — is refused with `errSecMissingEntitlement` (-34018) on every call.
+    /// command-line tool — has every write refused with `errSecMissingEntitlement` (-34018), and
+    /// is shown an *empty* data protection keychain on every read.
     public struct KeychainSecureStore: SecureStore {
 
         private let configuration: SecureStoreConfiguration
@@ -88,9 +89,13 @@
         ///
         /// Two consequences worth knowing before turning it on:
         ///
-        /// - The process must hold a keychain entitlement. Without one, every operation throws
-        ///   ``SecureStoreError/platform(_:)`` carrying `errSecMissingEntitlement` (-34018) —
-        ///   loudly, rather than falling back to the file-based keychain.
+        /// - The process must hold a keychain entitlement. Without one, `set`, `remove`, and
+        ///   `removeAll` throw ``SecureStoreError/platform(_:)`` carrying
+        ///   `errSecMissingEntitlement` (-34018). Reads are *not* refused: Security Services
+        ///   answers `SecItemCopyMatching` from an unentitled process with "not found", so
+        ///   `data(for:)` returns `nil` and `keys(withPrefix:)` returns `[]` for items an
+        ///   entitled process can see. Neither path ever falls back to the file-based keychain.
+        ///   Do not set this in a process that cannot carry the entitlement.
         /// - The two keychains do not share items. A store created with this set does not see
         ///   what the same service wrote without it, so changing the value on a shipped macOS
         ///   app needs a migration: read from the old store, write to the new one.

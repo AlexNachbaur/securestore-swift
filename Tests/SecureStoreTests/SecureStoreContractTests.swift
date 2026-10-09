@@ -22,8 +22,9 @@ import Testing
 ///
 /// `defer` cannot throw, but discarding the error with `try?` is not an option — swallowing a
 /// failure is exactly the behaviour this package is built to prevent, so a cleanup failure is
-/// recorded as a test issue instead.
-private func cleanUp(
+/// recorded as a test issue instead. Shared with the backend-specific suites for the same
+/// reason.
+func cleanUp(
     _ store: any SecureStore,
     sourceLocation: SourceLocation = #_sourceLocation
 ) {

@@ -133,17 +133,27 @@
                 do {
                     try protected.set(value, for: "k")
                 } catch SecureStoreError.platform(let failure) {
-                    // Unentitled: refused loudly, and nothing was written anywhere.
+                    // Unentitled: the write is refused loudly, and nothing was written anywhere.
                     #expect(failure.code == errSecMissingEntitlement)
                     #expect(failure.backend == .keychain)
                     #expect(try fileBased.data(for: "k") == nil)
+                    // Reads are the limit of "loudly": Security reports the data protection
+                    // keychain as *empty* to an unentitled process rather than refusing the
+                    // query, so a read answers "absent" — never a value from the file-based
+                    // keychain. Pinned so the documentation cannot overstate it.
+                    try fileBased.set(value, for: "k")
+                    defer { cleanUp(fileBased) }
+                    #expect(try protected.data(for: "k") == nil)
+                    #expect(try protected.keys(withPrefix: "") == [])
                     return
                 }
 
-                // Entitled: the item is in the data protection keychain and only there.
+                // Entitled: the item is in the data protection keychain and only there. (An
+                // unentitled process cannot clean that keychain up either, which is why the
+                // cleanup is scoped to this path.)
+                defer { cleanUp(protected) }
                 #expect(try protected.data(for: "k") == value)
                 #expect(try fileBased.data(for: "k") == nil)
-                try protected.removeAll()
             }
         }
 

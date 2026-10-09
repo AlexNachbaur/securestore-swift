@@ -21,9 +21,11 @@ Fixes from the October 2026 audit. Finding IDs (`SS-n`) refer to that audit.
 
   It is opt-in rather than the new default because that keychain requires a keychain
   entitlement: an unsigned process (`swift test`, `swift run`, a plain command-line tool) gets
-  `errSecMissingEntitlement` on every call, so flipping the default would break every such
-  consumer. With the flag set and no entitlement the store throws that failure — it never falls
-  back to the file-based keychain. The two keychains hold separate items, so enabling it on a
+  `errSecMissingEntitlement` on every write and is shown an empty keychain on every read, so
+  flipping the default would break every such consumer. With the flag set and no entitlement,
+  writes throw that failure and reads report "absent" — it never falls back to the file-based
+  keychain, and it cannot make reads throw, because Security answers the unentitled query with
+  "not found" rather than an error. The two keychains hold separate items, so enabling it on a
   shipped app is a migration. No effect off macOS. The flag lives on the Keychain backend, not
   on `SecureStoreConfiguration`, because it is an Apple concept. (SS-1)
 - **`PlatformSecureStore`** — a typealias for whichever backend the platform being compiled for
@@ -42,6 +44,10 @@ Fixes from the October 2026 audit. Finding IDs (`SS-n`) refer to that audit.
   copy. It is documentation only: no target includes it, so it cannot affect the build. (SS-10)
 
 ### Fixed
+
+- **A host that calls the read sink twice is reported as `invalidData`** rather than the last
+  value it handed over winning. The ABI says exactly once; a host that cannot decide which
+  value it stored should not get to pick one for the caller (found in review).
 
 - **Host bridge: a `get` that returns OK without calling the sink now throws
   `SecureStoreError.invalidData`** instead of returning `nil`. A host that failed inside its own

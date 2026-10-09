@@ -38,7 +38,7 @@ extern "C" {
 
 /* Status values. Any other value is a host error, surfaced verbatim to the Swift caller. */
 #define SECURESTORE_STATUS_OK        ((int32_t)0)
-#define SECURESTORE_STATUS_NOT_FOUND ((int32_t)1) /* not an error for get, remove, remove_all */
+#define SECURESTORE_STATUS_NOT_FOUND ((int32_t)1) /* not an error for get, remove, remove_all, keys */
 
 /*
  * Receives one value from `get`. Call exactly once for an item that exists, and not at all for

@@ -32,7 +32,8 @@ Swift 6.3+, SPM package with one library: `SecureStore`.
 - **There is no `accessGroup`.** Sharing scope is an opaque `namespace: String?`. On Apple it maps
   to a keychain access group; hosts without an equivalent ignore it. **On macOS it is ignored
   unless the store is created with `KeychainSecureStore(…, usesDataProtectionKeychain: true)`**,
-  which requires a keychain entitlement (unsigned processes get `errSecMissingEntitlement`). Do not add Apple-specific
+  which requires a keychain entitlement (an unsigned process gets `errSecMissingEntitlement` on
+  writes and an empty keychain on reads). Do not add Apple-specific
   parameters to the cross-platform API.
 - On Android the host must call `securestore_register_host` (typically from
   `Application.onCreate`) before any store is used; until then operations throw

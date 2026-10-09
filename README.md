@@ -129,8 +129,11 @@ KeychainSecureStore(
 
 It is not the default because it needs a keychain entitlement: a signed app (or a tool with
 `keychain-access-groups`) has one, while `swift run`, `swift test`, and unsigned command-line
-tools do not and get `errSecMissingEntitlement` (-34018) on every call — thrown, never a silent
-fallback. The two keychains do not share items, so turning the flag on for a shipped macOS app
+tools do not: every write throws `errSecMissingEntitlement` (-34018), and every read sees an
+*empty* data protection keychain — `data(for:)` is `nil`, `keys(withPrefix:)` is `[]` — because
+Security Services answers an unentitled query with "not found" rather than refusing it. Neither
+path falls back to the file-based keychain, so set the flag only in a process that carries the
+entitlement. The two keychains do not share items, so turning the flag on for a shipped macOS app
 means migrating: read from a store without it, write to one with it. The flag changes nothing
 on iOS, tvOS, watchOS, or visionOS.
 
