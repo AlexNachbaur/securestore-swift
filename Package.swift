@@ -27,8 +27,13 @@ let package = Package(
     targets: [
         // libsecret, reached through pkg-config. This is the package's only external
         // dependency, and it is deliberately scoped to one platform: the target dependency
-        // below is conditional on Linux, so pkg-config is never consulted — and
-        // `libsecret-1-dev` is never required — when building for anything else.
+        // below is conditional on Linux, so `libsecret-1-dev` is never required — and nothing
+        // is compiled or linked against it — when building for anything else.
+        //
+        // SwiftPM still *looks* for the pkg-config file on every platform, because it
+        // evaluates every target's declaration before applying the platform condition. Off
+        // Linux that produces `warning: couldn't find pc file for libsecret-1`. The warning is
+        // harmless and expected; it does not mean the dependency has leaked.
         .systemLibrary(
             name: "CSecret",
             path: "Sources/CSecret",

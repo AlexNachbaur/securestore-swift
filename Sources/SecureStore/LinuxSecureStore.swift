@@ -103,6 +103,12 @@
 
     // MARK: - Store
 
+    /// The backend `SecureStore` resolves to on this platform. See ``LinuxSecureStore``.
+    ///
+    /// Each backend file defines this under its own compile-time gate. The four gates are
+    /// mutually exclusive and exhaustive, so exactly one definition exists in any build.
+    public typealias PlatformSecureStore = LinuxSecureStore
+
     /// `SecureStore` over the freedesktop.org Secret Service, via libsecret.
     ///
     /// Items land in the user's default collection — the login keyring on a typical desktop —
@@ -113,14 +119,26 @@
     /// Requires a running Secret Service provider (gnome-keyring, KWallet's Secret Service
     /// bridge, or KeePassXC). A headless host with no provider will fail loudly on first use
     /// rather than silently persisting nothing.
+    ///
+    /// Every call is a synchronous D-Bus round trip, and an unlock prompt is part of it: a call
+    /// against a locked keyring blocks until the user answers or dismisses the prompt, with no
+    /// timeout and no cancellation. Keep these calls off the main actor.
     public struct LinuxSecureStore: SecureStore {
 
         private let configuration: SecureStoreConfiguration
 
+        /// Creates a store over the items identified by `configuration`.
+        ///
+        /// Nothing is read or written — and the Secret Service is not contacted — until the
+        /// first operation, so this cannot fail.
         public init(_ configuration: SecureStoreConfiguration) {
             self.configuration = configuration
         }
 
+        /// Creates a store for `service`, optionally scoped to `namespace`.
+        ///
+        /// Both are stored as item attributes and matched exactly, so two stores differing in
+        /// either never see each other's items.
         public init(service: String, namespace: String? = nil) {
             self.init(SecureStoreConfiguration(service: service, namespace: namespace))
         }
@@ -223,6 +241,23 @@
             guard let first = items?.pointee.data else { return nil }
 
             guard let value = secret_item_get_secret(secretItem(first)) else {
+                // No secret was loaded. The usual reason is that the item is still locked: the
+                // search asks the service to unlock, but a dismissed prompt is not an error to
+                // libsecret — it hands the item back locked, with no secret and no `GError`.
+                // That is an unreadable store, not corrupt data, and has to say so: a caller
+                // told `.invalidData` goes looking at the stored bytes, and a caller who
+                // discards the item on `.invalidData` deletes a perfectly good credential.
+                guard secret_item_get_locked(secretItem(first)) == 0 else {
+                    throw SecureStoreError.platform(
+                        PlatformFailure(
+                            backend: .secretService,
+                            operation: .read,
+                            code: Int32(SECRET_ERROR_IS_LOCKED.rawValue),
+                            message: "The item is locked and was not unlocked",
+                            domain: g_quark_to_string(secret_error_get_quark()).map { String(cString: $0) }
+                        )
+                    )
+                }
                 throw SecureStoreError.invalidData
             }
             defer { releaseValue(value) }

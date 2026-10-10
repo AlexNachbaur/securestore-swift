@@ -5,6 +5,8 @@
 .build/
 .swiftpm/
 Package.resolved
+# `swift package edit --path` symlinks local checkouts here; never commit them.
+Packages/
 
 # Xcode
 DerivedData/

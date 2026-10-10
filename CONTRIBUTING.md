@@ -27,16 +27,16 @@ CI runs the suite in an Android emulator, so a change that only compiles will st
 ## Before opening a pull request
 
 ```bash
-swift format --in-place --recursive Sources Tests Package.swift
-swift format lint --strict --recursive Sources Tests Package.swift
-swift test
+make format   # swift format --in-place --recursive Sources Tests Package.swift
+make check    # lint, build, test
 ```
 
 ## What a good change looks like
 
 **Behaviour goes in the contract suite.** `Tests/SecureStoreTests/SecureStoreContractTests.swift`
-is deliberately not platform-guarded: it runs against Keychain Services on Apple and against a
-host-registered in-memory backend elsewhere. If you are changing what a store *does*, assert it
+is deliberately not platform-guarded: it runs against Keychain Services on Apple, Credential
+Manager on Windows, a real Secret Service on Linux, and a host-registered in-memory backend on
+Android. If you are changing what a store *does*, assert it
 there so every backend is held to it. Backend-specific tests are for backend-specific mechanics
 only.
 
@@ -53,6 +53,19 @@ version must keep working. Additive callbacks are fine; changing an existing sig
 breaking change. The rules in [docs/design/host-bridge-abi.md](docs/design/host-bridge-abi.md) —
 no heap pointers across the boundary, status codes for errors, non-capturing callbacks — are
 requirements, not suggestions.
+
+## Code review
+
+Every pull request gets an automated review from Claude (`.github/workflows/claude-review.yml`),
+which posts inline comments. `main` requires every review thread to be resolved before a merge:
+fix what the comment describes, or reply with why it does not apply, then resolve it. A thread
+resolved without either is reopened.
+
+The review needs a secret that only this repository holds, so a pull request **from a fork** is
+not reviewed automatically — a maintainer adds the `claude-review` label once they have looked
+at the submission, which runs the review (and re-runs it on later pushes). Your fork's own copy
+of the workflow skips itself, and the review is not a required check, so nothing about this
+blocks you from building, testing, or opening the pull request.
 
 ## Reporting bugs
 
