@@ -122,7 +122,7 @@ jobs:
       # The only maintained action that installs a Swift toolchain on all three host platforms,
       # and it wires up the MSVC environment Swift needs here. It publishes no moving major tag,
       # so this is pinned exactly and left to Dependabot.
-      - uses: SwiftyLab/setup-swift@v1.14.0
+      - uses: SwiftyLab/setup-swift@v1.14.1
         with:
           swift-version: ${{ env.SWIFT_VERSION }}
 
