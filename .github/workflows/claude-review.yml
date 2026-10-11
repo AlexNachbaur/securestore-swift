@@ -82,7 +82,7 @@ jobs:
       issues: read
       id-token: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           # The PR's merge commit, for both events: under pull_request_target the default
           # checkout would be the base branch, and the reviewer needs to read the proposed
