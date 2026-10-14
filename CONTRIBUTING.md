@@ -56,16 +56,17 @@ requirements, not suggestions.
 
 ## Code review
 
-Every pull request gets an automated review from Claude (`.github/workflows/claude-review.yml`),
-which posts inline comments. `main` requires every review thread to be resolved before a merge:
-fix what the comment describes, or reply with why it does not apply, then resolve it. A thread
-resolved without either is reopened.
+Every pull request is reviewed by Claude. The review is posted by the **codergirl-reviewer** app
+as inline comments and a **Claude review** check. That check is required, and `main` also
+requires every review thread to be resolved before a merge: fix what the comment describes, or
+reply with why it does not apply, then resolve it. A thread resolved without either is reopened.
 
-The review needs a secret that only this repository holds, so a pull request **from a fork** is
-not reviewed automatically — a maintainer adds the `claude-review` label once they have looked
-at the submission, which runs the review (and re-runs it on later pushes). Your fork's own copy
-of the workflow skips itself, and the review is not a required check, so nothing about this
-blocks you from building, testing, or opening the pull request.
+The review runs on the maintainer's infrastructure, not in this repository — there is no review
+workflow or secret here, and nothing to set up in your fork. A pull request **from a fork** is
+reviewed once a maintainer adds the `claude-review` label, which is the maintainer accepting the
+submission for review; later pushes are re-reviewed while the label stays. Until then the
+**Claude review** check is missing and the pull request cannot merge, but nothing stops you
+building, testing, or opening it.
 
 ## Reporting bugs
 
