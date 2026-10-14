@@ -5,6 +5,141 @@ All notable changes to SecureStore will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Fixes from the October 2026 audit. Finding IDs (`SS-n`) refer to that audit.
+
+### Added
+
+- **`KeychainSecureStore(…, usesDataProtectionKeychain:)`** — opts a store into the data
+  protection keychain on macOS. The audit confirmed what Apple's TN3137 describes: the macOS
+  file-based keychain, the default there, ignores the access group and the accessibility class.
+  An item written with one `namespace` read back under another and under none, and no
+  accessibility attribute was stored — so on macOS two stores differing only in `namespace`
+  were the same store, which is exactly the "readable outside its intended scope" case
+  SECURITY.md lists as in scope. The data protection keychain enforces both.
+
+  It is opt-in rather than the new default because that keychain requires a keychain
+  entitlement: an unsigned process (`swift test`, `swift run`, a plain command-line tool) gets
+  `errSecMissingEntitlement` on every write and is shown an empty keychain on every read, so
+  flipping the default would break every such consumer. With the flag set and no entitlement,
+  writes throw that failure and reads report "absent" — it never falls back to the file-based
+  keychain, and it cannot make reads throw, because Security answers the unentitled query with
+  "not found" rather than an error. The two keychains hold separate items, so enabling it on a
+  shipped app is a migration. No effect off macOS. The flag lives on the Keychain backend, not
+  on `SecureStoreConfiguration`, because it is an Apple concept. (SS-1)
+- **`PlatformSecureStore`** — a typealias for whichever backend the platform being compiled for
+  has: `KeychainSecureStore`, `WindowsSecureStore`, `LinuxSecureStore`, or `HostSecureStore`.
+  The package's premise is that callers never learn which platform they are on, yet every
+  consumer had to write the same four-branch `#if` to construct a store. Each backend file
+  defines the alias inside its own existing gate, so it cannot disagree with backend selection.
+  The concrete names are unchanged. (SS-21)
+- **`SecureStoreError` and `PlatformFailure` conform to `LocalizedError`.** Without it,
+  `error.localizedDescription` — what most logging and alert code actually calls — returned
+  Foundation's "The operation couldn’t be completed", discarding the backend, operation, code
+  and message that `PlatformFailure` exists to carry. It now returns the same line as
+  `description`. (SS-20)
+- **`docs/design/securestore_host.h`** — a reference C header declaring
+  `securestore_register_host` and `securestore_register_host_describer`, for a JNI shim to
+  copy. It is documentation only: no target includes it, so it cannot affect the build. (SS-10)
+
+### Fixed
+
+- **A host that calls the read sink twice is reported as `invalidData`** rather than the last
+  value it handed over winning. The ABI says exactly once; a host that cannot decide which
+  value it stored should not get to pick one for the caller (found in review).
+
+- **Host bridge: a `get` that returns OK without calling the sink now throws
+  `SecureStoreError.invalidData`** instead of returning `nil`. A host that failed inside its own
+  lookup and still returned `0`, or simply forgot to call back, read as "no such item" — a
+  signed-out user, from the one backend written by third parties. A missing item is still
+  reported by status `1` and still reads as `nil`. **A host relying on "OK and no callback" to
+  mean absent must return `1` instead.** (SS-3)
+- **Host bridge: a malformed sink call now throws `SecureStoreError.invalidData`** instead of
+  yielding an empty value: a negative length, or a `NULL` buffer with a positive length. Both
+  describe no value at all, and reporting them as "stored, and empty" turned a host bug into a
+  plausible credential. The Windows and Linux backends already refused the equivalent. (SS-24)
+- **Host bridge: storing a value larger than `Int32.max` bytes throws instead of trapping.** The
+  C signature carries the length as `int32_t` and `Int32(_:)` traps on overflow, so an
+  oversized value crashed the process; the Windows backend had the equivalent guard and the
+  host path did not. The failure is a `PlatformFailure` for the host backend with code `0` —
+  the host was never called, and `0` is the one code a host cannot report as a failure. (SS-4)
+- **Windows: a key beginning with a combining mark is no longer lost.** Such a key fuses with
+  the `:` that ends the store's target-name prefix into a single user-perceived character, so
+  the character-based `hasPrefix` concluded the credential belonged to another store: it was
+  missing from `keys()`, and `removeAll()` left it behind in the user's Credential Manager. The
+  store's prefix is now matched by Unicode scalar. (SS-5)
+- **Windows: `%` and `:` are now escaped even when followed by a combining mark.** The escape
+  used Foundation's default search, which matches whole composed characters and so skipped a
+  separator that had a combining mark after it, leaving it raw in the target name. Two stores
+  could then flatten to the same name — namespace `"b:\u{301}c"` + key `"\u{301}k"` and
+  namespace `"b"` + key `"\u{301}c:\u{301}k"` — which is exactly the collision the escaping
+  exists to prevent. Found while verifying SS-5; the search is now literal. **A credential
+  written by 0.2.0 under such a name is not found by this version**; ordinary names are
+  unaffected.
+- **Windows: `GetLastError` is captured once, in the same expression as the call that failed.**
+  It was read after the enclosing `withCString` scope had unwound, and then a second time to
+  build the error — so the `ERROR_NOT_FOUND` check and the reported code could each see a value
+  some later call had overwritten, turning a missing item into a thrown error or the reverse.
+  (SS-7)
+- **Linux: reading a locked item reports that it is locked.** When an unlock prompt is
+  dismissed, libsecret returns the item with no secret and no `GError`, which surfaced as
+  `.invalidData` — sending the caller to look for corrupt bytes, or to delete a perfectly good
+  credential. It is now a `PlatformFailure` carrying libsecret's own `SECRET_ERROR_IS_LOCKED`
+  (domain `secret-error`, code 2). (SS-8)
+- **Apple: `set` no longer fails when another process deletes the item mid-write.** A write is
+  an add that falls back to an update on duplicate; a delete landing between the two made the
+  update fail with `errSecItemNotFound`, from a store with nothing wrong with it. The add is now
+  retried once. An app and its extensions share a store, so this is an ordinary interleaving
+  rather than a theoretical one. (SS-14)
+
+### Changed
+
+- `PlatformFailure.Operation.removeAll` no longer spells out a raw value identical to its case
+  name. The value is unchanged. (SS-20)
+
+### Documentation
+
+- **Every operation is synchronous and can block on UI** — a Linux keyring unlock prompt, a
+  macOS keychain prompt, or whatever a host backend does — with no timeout and no cancellation.
+  This was true and unstated; it is now on the protocol, on `LinuxSecureStore`, and in the
+  README, with the advice to keep store calls off the main actor. (SS-9)
+- **The host ABI now specifies what the signatures do not** (`docs/design/host-bridge-abi.md`,
+  Rules 5–7): strings are standard UTF-8 and therefore *not* what JNI's `NewStringUTF` /
+  `GetStringUTFChars` produce; callbacks run synchronously on the calling Swift thread, which
+  may not be attached to the JVM; and which pointers may be `NULL` — no function pointer may,
+  and passing one is undefined behaviour because the `@_cdecl` parameters are non-optional.
+  (SS-10)
+- The ABI document no longer claims a host can be validated "by running the same tests". The
+  contract suite always installs its own in-memory fixture and cannot be pointed at a real
+  host. (SS-12)
+- **`SECURITY.md` now states what the platform stores do not protect**: on Windows, and on Linux
+  once the keyring is unlocked, any process running as the same user can read the items; and
+  service, namespace and key names are stored unencrypted on both. `service`/`namespace` are a
+  collision boundary there, not an access-control one. The supported-versions table also said
+  `0.1.x`. (SS-24, SS-17)
+- Doc comments added to every public initialiser, the `PlatformFailure` members and enum cases,
+  and the `SecureStoreHostCallbacks` members. (SS-22)
+- Corrected stale statements: the protocol's summary still described two backends; the README
+  showed `print(error)` output without the `platform(…)` wrapper it prints, pointed "above" at
+  a section below, and described a cross-compile command as running in an emulator; the ABI
+  document counted six operations where there are five. `Package.swift` claimed pkg-config is
+  "never consulted" off Linux, though SwiftPM looks for the file everywhere and warns
+  `couldn't find pc file for libsecret-1` — harmless, and now explained. (SS-17, SS-19)
+
+### Tests
+
+- The contract suite gained keys that are awkward for at least one backend — containing `:`,
+  `%`, `*`, the escape sequences themselves, non-ASCII, and combining marks — plus literal
+  prefix matching for the same characters and a service/key separator collision. (SS-15, SS-5)
+- **Namespace isolation is now asserted** on Windows, Linux, and the host bridge: same service,
+  different namespaces, including that an unscoped store does not reach into a scoped one. It
+  is deliberately *not* asserted on Apple, where the namespace is a keychain access group that
+  a `swift test` process has no entitlement for. (SS-2)
+- New suites for a misbehaving host (SS-3, SS-4, SS-24) and for the Keychain add-or-update
+  interleaving (SS-14). The forced-failure tests moved out of the `SecureStoreConfiguration`
+  suite, where a failure blamed the wrong thing. (SS-15)
+
 ## [0.2.0] - 2026-07-27
 
 ### Added

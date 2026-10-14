@@ -3,7 +3,7 @@
 //  SecureStoreTests
 //
 //  An in-memory host backend wired through the real C entry point, so the contract suite on
-//  non-Apple platforms exercises the actual ABI — the sink callbacks, the status codes, and the
+//  host-bridge platforms (Android) exercises the actual ABI — the sink callbacks, the status codes, and the
 //  service/namespace threading — rather than a Swift stand-in that bypasses all of it.
 //
 //  Everything is file-scope because `@convention(c)` functions cannot capture context. That
@@ -33,6 +33,17 @@
     /// unreachable from a test.
     let hostBackendFixtureFailingKey = "force-failure"
 
+    /// Reading these keys makes the fixture misbehave the way a buggy host can: reporting
+    /// success without calling the sink at all, calling it with a negative length, or calling
+    /// it with no buffer and a positive length. A correct in-memory backend never does any of
+    /// them, so without a way to force each one the code that refuses to read them as "missing"
+    /// or "empty" would be unreachable from a test.
+    let hostBackendFixtureSilentSinkKey = "force-ok-without-sink"
+    let hostBackendFixtureNegativeLengthKey = "force-negative-length"
+    let hostBackendFixtureNullBufferKey = "force-null-buffer"
+    /// Calls the sink twice with different values — a host that cannot decide which it stored.
+    let hostBackendFixtureDoubleSinkKey = "force-double-sink"
+
     private let hostSet: SecureStoreHostCallbacks.SetFn = { service, namespace, key, bytes, length in
         let itemKey = String(cString: key)
         guard itemKey != hostBackendFixtureFailingKey else {
@@ -47,6 +58,26 @@
     private let hostGet: SecureStoreHostCallbacks.GetFn = { service, namespace, key, context, sink in
         let scopeKey = scope(service, namespace)
         let itemKey = String(cString: key)
+        if itemKey == hostBackendFixtureSilentSinkKey {
+            return SecureStoreStatus.ok
+        }
+        if itemKey == hostBackendFixtureNegativeLengthKey {
+            let byte: UInt8 = 0
+            withUnsafePointer(to: byte) { sink(context, $0, -1) }
+            return SecureStoreStatus.ok
+        }
+        if itemKey == hostBackendFixtureNullBufferKey {
+            sink(context, nil, 4)
+            return SecureStoreStatus.ok
+        }
+        if itemKey == hostBackendFixtureDoubleSinkKey {
+            for value in [Data("first".utf8), Data("second".utf8)] {
+                value.withUnsafeBytes { buffer in
+                    sink(context, buffer.bindMemory(to: UInt8.self).baseAddress, Int32(value.count))
+                }
+            }
+            return SecureStoreStatus.ok
+        }
         guard let value = storage.withLock({ $0[scopeKey]?[itemKey] }) else {
             return SecureStoreStatus.notFound
         }
