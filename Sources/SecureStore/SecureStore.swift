@@ -2,12 +2,21 @@ import Foundation
 
 /// Secure, persistent storage for small secrets — tokens, credentials, keys.
 ///
-/// Backed by Keychain Services on Apple platforms and by a host-registered backend elsewhere
-/// (see `HostSecureStore`). Callers never learn which.
+/// Backed by Keychain Services on Apple platforms, Credential Manager on Windows, the
+/// freedesktop.org Secret Service on Linux, and a host-registered backend everywhere else (see
+/// `HostSecureStore`). `PlatformSecureStore` names whichever one the current platform has, so
+/// callers never need to learn which.
 ///
 /// Every operation is throwing, including reads. Silently swallowing a keychain failure hides
 /// exactly the class of bug that matters here — a credential that appears absent because the
 /// item was locked or the entitlement was wrong reads as "signed out" rather than as an error.
+///
+/// Every operation is also **synchronous, and may block for as long as the platform takes**.
+/// That is usually microseconds, but not always: on Linux a locked keyring raises an unlock
+/// prompt and the call does not return until the user answers or dismisses it, an Apple
+/// keychain can do the same, and a host backend takes however long the host's implementation
+/// does. There is no timeout and no cancellation — a blocked call ignores task cancellation —
+/// so do not call a store from the main actor or from any context that must stay responsive.
 public protocol SecureStore: Sendable {
 
     /// Stores `data` under `key`, replacing any existing value.
@@ -62,8 +71,16 @@ public struct SecureStoreConfiguration: Sendable, Equatable {
     /// equivalent — storage there is per-app — so exposing the Apple concept would bake a
     /// platform assumption into a cross-platform API. Hosts that cannot honour a namespace
     /// should ignore it rather than fail.
+    ///
+    /// A namespace is therefore a sharing convenience, not an isolation boundary you can rely
+    /// on everywhere: a backend may ignore it. The macOS file-based keychain is one that does —
+    /// see `KeychainSecureStore` for the opt-in that makes it enforced there.
     public let namespace: String?
 
+    /// Creates a configuration for the store identified by `service` and `namespace`.
+    ///
+    /// An empty `namespace` is normalized to `nil`: it is the absence of a scope, not a scope
+    /// named `""`, and the backends would otherwise disagree about which of the two it means.
     public init(service: String, namespace: String? = nil) {
         self.service = service
         // An empty namespace is not a scope — it is the absence of one — so it is normalized to
@@ -83,12 +100,21 @@ public struct SecureStoreConfiguration: Sendable, Equatable {
 // MARK: - Errors
 
 /// A failure from the underlying secure store.
-public enum SecureStoreError: Error, Equatable, Sendable {
+///
+/// Conforms to `LocalizedError` so that `error.localizedDescription` — which is what most
+/// logging and alert code reaches for — carries the same text as the failure itself. Without
+/// it Foundation substitutes "The operation couldn’t be completed", which discards exactly the
+/// context `PlatformFailure` exists to preserve.
+public enum SecureStoreError: Error, Equatable, Sendable, LocalizedError {
 
     /// The platform store reported a failure. See ``PlatformFailure``.
     case platform(PlatformFailure)
 
     /// Stored bytes could not be read back as data.
+    ///
+    /// The store answered, but what it handed back was not a usable value: a result of the
+    /// wrong type, a missing buffer alongside a non-zero length, or a host that reported
+    /// success without delivering anything. Distinct from a missing item, which is `nil`.
     case invalidData
 
     /// No backend has been registered yet on a host that requires one.
@@ -96,6 +122,18 @@ public enum SecureStoreError: Error, Equatable, Sendable {
     /// Only reachable on hosts served by the C bridge, and only before the host calls its
     /// registration entry point.
     case backendNotRegistered
+
+    /// One line describing the failure, for `localizedDescription`.
+    public var errorDescription: String? {
+        switch self {
+        case .platform(let failure):
+            failure.description
+        case .invalidData:
+            "The secure store returned a value that could not be read back as data"
+        case .backendNotRegistered:
+            "No secure-store backend has been registered by the host"
+        }
+    }
 }
 
 /// A failure reported by the platform's own store, with the context needed to act on it.
@@ -106,30 +144,48 @@ public enum SecureStoreError: Error, Equatable, Sendable {
 /// throws away any message the platform supplied. That combination is not hypothetical — a
 /// missing Secret Service collection surfaces as writes failing while reads of absent keys
 /// succeed, which reads as a backend bug until you find the message that says otherwise.
-public struct PlatformFailure: Error, Equatable, Sendable, CustomStringConvertible {
+public struct PlatformFailure: Error, Equatable, Sendable, CustomStringConvertible, LocalizedError {
 
     /// Which platform store reported the failure.
     ///
     /// Present because `code` is only meaningful alongside it: `-25300` is a Keychain
     /// `errSecItemNotFound`, `1168` is a Windows `ERROR_NOT_FOUND`, and a host backend's codes
     /// are whatever that host chose.
+    ///
+    /// The raw value is the name used in ``PlatformFailure/description``.
     public enum Backend: String, Equatable, Sendable {
+        /// Apple Keychain Services. `code` is an `OSStatus`.
         case keychain = "Keychain Services"
+        /// Windows Credential Manager. `code` is a Win32 error.
         case credentialManager = "Credential Manager"
+        /// The freedesktop.org Secret Service on Linux. `code` is a `GError` code, qualified by
+        /// `domain`.
         case secretService = "Secret Service"
+        /// A backend the host registered through the C bridge. `code` is the host's own status.
         case host = "host backend"
     }
 
     /// Which `SecureStore` operation was in flight.
+    ///
+    /// The raw value is the name used in ``PlatformFailure/description``.
     public enum Operation: String, Equatable, Sendable {
+        /// `SecureStore.set(_:for:)`.
         case set
+        /// `SecureStore.data(for:)`.
         case read
+        /// `SecureStore.remove(_:)`.
         case remove
-        case removeAll = "removeAll"
+        /// `SecureStore.removeAll()`.
+        case removeAll
+        /// `SecureStore.keys(withPrefix:)`, and `allKeys()` through it.
         case listKeys = "key enumeration"
     }
 
+    /// The platform store that reported the failure — and so the code space `code` belongs to.
     public let backend: Backend
+
+    /// The operation that failed. A write failure and an enumeration failure with the same
+    /// code call for different handling, and the code alone cannot tell them apart.
     public let operation: Operation
 
     /// The raw platform status: an `OSStatus` on Apple, a Win32 error on Windows, a `GError`
@@ -149,6 +205,8 @@ public struct PlatformFailure: Error, Equatable, Sendable, CustomStringConvertib
     /// `nil` on platforms with a single code space.
     public let domain: String?
 
+    /// Creates a failure. Public so a test double or a custom `SecureStore` conformer can
+    /// report failures in the same shape the built-in backends do.
     public init(
         backend: Backend,
         operation: Operation,
@@ -176,4 +234,7 @@ public struct PlatformFailure: Error, Equatable, Sendable, CustomStringConvertib
         }
         return text
     }
+
+    /// The same line as ``description``, for `localizedDescription`.
+    public var errorDescription: String? { description }
 }

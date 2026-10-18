@@ -28,17 +28,24 @@
     ///
     /// `%` must be escaped first: doing it second would re-escape the `%` introduced by the
     /// colon rule and corrupt the round trip.
+    ///
+    /// The search is `.literal` on purpose. Foundation's default search matches whole composed
+    /// characters, so a `:` followed by a combining mark is a different "character" and is
+    /// skipped — leaving a raw separator in the target name, which is the collision this
+    /// escaping exists to rule out. A target name is a sequence of code units, not of
+    /// user-perceived characters, and has to be treated as one throughout.
     private func escape(_ component: String) -> String {
         component
-            .replacingOccurrences(of: "%", with: "%25")
-            .replacingOccurrences(of: ":", with: "%3A")
+            .replacingOccurrences(of: "%", with: "%25", options: .literal)
+            .replacingOccurrences(of: ":", with: "%3A", options: .literal)
     }
 
-    /// Inverse of `escape(_:)`. Applied in the reverse order for the same reason.
+    /// Inverse of `escape(_:)`. Applied in the reverse order for the same reason, and literal
+    /// for the same reason.
     private func unescape(_ component: String) -> String {
         component
-            .replacingOccurrences(of: "%3A", with: ":")
-            .replacingOccurrences(of: "%25", with: "%")
+            .replacingOccurrences(of: "%3A", with: ":", options: .literal)
+            .replacingOccurrences(of: "%25", with: "%", options: .literal)
     }
 
     /// Runs `body` with `string` as a NUL-terminated UTF-16 buffer.
@@ -87,14 +94,18 @@
         return text.isEmpty ? nil : text
     }
 
-    /// Wraps the calling thread's last Win32 error as a `SecureStoreError`.
+    /// Wraps a Win32 error code as a `SecureStoreError`.
+    ///
+    /// The code is a parameter rather than read here because `GetLastError` is only meaningful
+    /// immediately after the call that failed: every subsequent Win32 call on the thread —
+    /// including the one that formats the message, and whatever the Swift runtime does while
+    /// unwinding a `withCString` scope — may overwrite it. Each call site therefore captures it
+    /// exactly once, in the same expression as the failing call, and passes it along.
     ///
     /// `GetLastError` is `DWORD`; the bit pattern is preserved rather than clamped so a report
-    /// can be traced back to the exact `ERROR_*` value. It is read exactly once — every
-    /// subsequent Win32 call, including the one that formats the message, would overwrite it.
-    private func lastError(_ operation: PlatformFailure.Operation) -> SecureStoreError {
-        let code = GetLastError()
-        return .platform(
+    /// can be traced back to the exact `ERROR_*` value.
+    private func win32Failure(_ code: DWORD, _ operation: PlatformFailure.Operation) -> SecureStoreError {
+        .platform(
             PlatformFailure(
                 backend: .credentialManager,
                 operation: operation,
@@ -105,6 +116,12 @@
     }
 
     // MARK: - Store
+
+    /// The backend `SecureStore` resolves to on this platform. See ``WindowsSecureStore``.
+    ///
+    /// Each backend file defines this under its own compile-time gate. The four gates are
+    /// mutually exclusive and exhaustive, so exactly one definition exists in any build.
+    public typealias PlatformSecureStore = WindowsSecureStore
 
     /// `SecureStore` over the Windows Credential Manager.
     ///
@@ -121,10 +138,17 @@
 
         private let configuration: SecureStoreConfiguration
 
+        /// Creates a store over the items identified by `configuration`.
+        ///
+        /// Nothing is read or written until the first operation, so this cannot fail.
         public init(_ configuration: SecureStoreConfiguration) {
             self.configuration = configuration
         }
 
+        /// Creates a store for `service`, optionally scoped to `namespace`.
+        ///
+        /// Both are escaped and joined with the key into the credential's target name, so two
+        /// stores differing in either never see each other's items.
         public init(service: String, namespace: String? = nil) {
             self.init(SecureStoreConfiguration(service: service, namespace: namespace))
         }
@@ -144,10 +168,18 @@
 
         /// Recovers the key from a full target name, or `nil` if the name belongs to another
         /// store. The prefix check is what makes an over-matching enumeration filter harmless.
+        ///
+        /// The store's prefix is matched by Unicode scalar, not with `hasPrefix`. `String`
+        /// compares by user-perceived character, and a key that begins with a combining mark
+        /// fuses with the `:` that ends the prefix into a single character — so `hasPrefix`
+        /// reports that the name does not start with the prefix at all, and the item would
+        /// vanish from `keys()` and be left behind by `removeAll()`. Dropping `prefix.count`
+        /// characters has the same flaw in the other direction.
         private func key(fromTargetName name: String) -> String? {
-            let prefix = targetPrefix
-            guard name.hasPrefix(prefix) else { return nil }
-            return unescape(String(name.dropFirst(prefix.count)))
+            let prefix = targetPrefix.unicodeScalars
+            let scalars = name.unicodeScalars
+            guard scalars.starts(with: prefix) else { return nil }
+            return unescape(String(scalars.dropFirst(prefix.count)))
         }
 
         // MARK: - SecureStore
@@ -174,8 +206,8 @@
                 )
             }
 
-            let written = withWideString(targetName(for: key)) { target -> Bool in
-                data.withUnsafeBytes { buffer -> Bool in
+            let failure = withWideString(targetName(for: key)) { target -> DWORD? in
+                data.withUnsafeBytes { buffer -> DWORD? in
                     guard let bytes = buffer.bindMemory(to: UInt8.self).baseAddress else {
                         // An empty `Data` has no base address, but `CREDENTIALW` still wants a
                         // non-null pointer alongside a zero length. Storing an empty value has
@@ -192,36 +224,37 @@
                     )
                 }
             }
-            guard written else { throw lastError(.set) }
+            if let failure { throw win32Failure(failure, .set) }
         }
 
-        /// The `CredWriteW` call itself. `CredWriteW` replaces an existing credential with the
-        /// same target name, so there is no add-then-update dance as on Apple.
+        /// The `CredWriteW` call itself, returning the Win32 error if it failed and `nil` if it
+        /// succeeded. `CredWriteW` replaces an existing credential with the same target name, so
+        /// there is no add-then-update dance as on Apple.
         private func write(
             target: UnsafeMutablePointer<WCHAR>,
             bytes: UnsafeMutablePointer<UInt8>,
             count: Int
-        ) -> Bool {
+        ) -> DWORD? {
             var credential = CREDENTIALW()
             credential.Type = DWORD(CRED_TYPE_GENERIC)
             credential.TargetName = target
             credential.CredentialBlob = bytes
             credential.CredentialBlobSize = DWORD(count)
             credential.Persist = DWORD(CRED_PERSIST_LOCAL_MACHINE)
-            return CredWriteW(&credential, 0)
+            return CredWriteW(&credential, 0) ? nil : GetLastError()
         }
 
         public func data(for key: String) throws -> Data? {
             var credential: PCREDENTIALW?
-            let read = withWideString(targetName(for: key)) { target in
-                CredReadW(target, DWORD(CRED_TYPE_GENERIC), 0, &credential)
+            let failure = withWideString(targetName(for: key)) { target -> DWORD? in
+                CredReadW(target, DWORD(CRED_TYPE_GENERIC), 0, &credential) ? nil : GetLastError()
             }
 
-            guard read else {
+            if let failure {
                 // A missing item is `nil`, never an error — the distinction the whole package
                 // exists to preserve.
-                if GetLastError() == ERROR_NOT_FOUND { return nil }
-                throw lastError(.read)
+                if failure == ERROR_NOT_FOUND { return nil }
+                throw win32Failure(failure, .read)
             }
             guard let credential else { throw SecureStoreError.invalidData }
             defer { CredFree(credential) }
@@ -241,24 +274,24 @@
         }
 
         public func remove(_ key: String) throws {
-            let deleted = withWideString(targetName(for: key)) { target in
-                CredDeleteW(target, DWORD(CRED_TYPE_GENERIC), 0)
+            let failure = withWideString(targetName(for: key)) { target -> DWORD? in
+                CredDeleteW(target, DWORD(CRED_TYPE_GENERIC), 0) ? nil : GetLastError()
             }
-            guard deleted else {
+            if let failure {
                 // Absent is the caller's desired end state, matching every other backend.
-                if GetLastError() == ERROR_NOT_FOUND { return }
-                throw lastError(.remove)
+                if failure == ERROR_NOT_FOUND { return }
+                throw win32Failure(failure, .remove)
             }
         }
 
         public func removeAll() throws {
             for name in try targetNames(matchingKeyPrefix: "", for: .removeAll) {
-                let deleted = withWideString(name) { target in
-                    CredDeleteW(target, DWORD(CRED_TYPE_GENERIC), 0)
+                let failure = withWideString(name) { target -> DWORD? in
+                    CredDeleteW(target, DWORD(CRED_TYPE_GENERIC), 0) ? nil : GetLastError()
                 }
                 // A concurrent deleter winning the race leaves the desired end state anyway.
-                if !deleted, GetLastError() != ERROR_NOT_FOUND {
-                    throw lastError(.removeAll)
+                if let failure, failure != ERROR_NOT_FOUND {
+                    throw win32Failure(failure, .removeAll)
                 }
             }
         }
@@ -277,6 +310,11 @@
         /// machine. The results are re-checked in Swift regardless: the documented filter syntax
         /// says nothing about an asterisk appearing *inside* the prefix, which a caller's key
         /// could contain, and a backend that over-matched would hand one store another's items.
+        ///
+        /// That re-check goes through `key(fromTargetName:)`, which matches the store's own
+        /// prefix by Unicode scalar, and then applies `keyPrefix` to the recovered key with the
+        /// same `hasPrefix` the Keychain and Secret Service backends use — so what counts as a
+        /// prefix is decided the same way on every platform, whatever `CredEnumerateW` returned.
         private func targetNames(
             matchingKeyPrefix keyPrefix: String,
             for operation: PlatformFailure.Operation
@@ -285,27 +323,27 @@
 
             var count: DWORD = 0
             var credentials: UnsafeMutablePointer<PCREDENTIALW?>?
-            let enumerated = withWideString(filter) { filter in
-                CredEnumerateW(filter, 0, &count, &credentials)
+            let failure = withWideString(filter) { filter -> DWORD? in
+                CredEnumerateW(filter, 0, &count, &credentials) ? nil : GetLastError()
             }
 
-            guard enumerated else {
+            if let failure {
                 // No match at all is reported as a failure with ERROR_NOT_FOUND, not as an empty
                 // set, so it has to be translated back into one.
-                if GetLastError() == ERROR_NOT_FOUND { return [] }
-                throw lastError(operation)
+                if failure == ERROR_NOT_FOUND { return [] }
+                throw win32Failure(failure, operation)
             }
             guard let credentials else { return [] }
             defer { CredFree(credentials) }
 
-            let expectedPrefix = targetPrefix + escape(keyPrefix)
             var names: [String] = []
             for index in 0..<Int(count) {
                 guard let credential = credentials[index],
                     let targetName = credential.pointee.TargetName
                 else { continue }
                 let name = String(decodingCString: targetName, as: UTF16.self)
-                guard name.hasPrefix(expectedPrefix) else { continue }
+                guard let storedKey = key(fromTargetName: name) else { continue }
+                guard keyPrefix.isEmpty || storedKey.hasPrefix(keyPrefix) else { continue }
                 names.append(name)
             }
             return names
