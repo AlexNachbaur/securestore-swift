@@ -137,6 +137,30 @@ entitlement. The two keychains do not share items, so turning the flag on for a 
 means migrating: read from a store without it, write to one with it. The flag changes nothing
 on iOS, tvOS, watchOS, or visionOS.
 
+### Keeping a credential on one device
+
+On Apple platforms items are written with `kSecAttrAccessibleAfterFirstUnlock` by default:
+readable while the device is locked, once it has been unlocked since boot — which a background
+refresh or a notification service extension needs — and carried to another device by an
+encrypted backup or a device-to-device transfer. A credential bound to something that does not
+migrate, such as a Secure Enclave key, should not migrate either. Ask for a `ThisDeviceOnly`
+class:
+
+```swift
+KeychainSecureStore(service: "com.example.auth", accessibility: .afterFirstUnlockThisDeviceOnly)
+```
+
+`KeychainAccessibility` answers two questions, *when* an item can be read and *whether* it may
+leave the device: `.afterFirstUnlock` (the default), `.afterFirstUnlockThisDeviceOnly`,
+`.whenUnlocked`, and `.whenUnlockedThisDeviceOnly`. A `whenUnlocked` item cannot be read while
+the device is locked — the read throws `errSecInteractionNotAllowed` — so keep those out of
+anything that runs in the background. The class is applied on every write, an overwrite
+included, so changing it re-classes an existing item the next time that item is written.
+
+**On macOS the class takes effect only in the data protection keychain.** The file-based
+keychain records no accessibility class, so there the parameter is accepted and changes nothing;
+combine it with `usesDataProtectionKeychain: true` when the guarantee matters on a Mac.
+
 ## Android
 
 On Android the secure store lives in Java, so the host registers an implementation at startup.

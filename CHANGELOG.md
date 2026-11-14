@@ -28,6 +28,21 @@ Fixes from the October 2026 audit. Finding IDs (`SS-n`) refer to that audit.
   "not found" rather than an error. The two keychains hold separate items, so enabling it on a
   shipped app is a migration. No effect off macOS. The flag lives on the Keychain backend, not
   on `SecureStoreConfiguration`, because it is an Apple concept. (SS-1)
+- **`KeychainSecureStore(…, accessibility:)`** and **`KeychainAccessibility`** — choose the
+  Keychain accessibility class: `.afterFirstUnlock` (the default, and the only class before
+  this), `.afterFirstUnlockThisDeviceOnly`, `.whenUnlocked`, or `.whenUnlockedThisDeviceOnly`.
+  `kSecAttrAccessibleAfterFirstUnlock` is right for a credential a locked device must still
+  read, but it migrates to another device through an encrypted backup or a device-to-device
+  transfer. A refresh token bound to a Secure Enclave key or an App Attest key id must not —
+  the key it is bound to stays behind, so the migrated copy is useless at best and misleading
+  at worst — and the only way to get `ThisDeviceOnly` was a second `SecureStore` outside this
+  package duplicating the Keychain code. The class is written on the update path as well as the
+  add, so an item first written under one class is re-classed by the next write from a store
+  configured with another; until now an overwrite set only the value. Existing callers are
+  unaffected: the default is the class every item was already written with. On macOS the class
+  takes effect only with `usesDataProtectionKeychain: true`, because the file-based keychain
+  records none. The option lives on the Keychain backend, not `SecureStoreConfiguration`, for
+  the same reason as the data protection flag. (#13)
 - **`PlatformSecureStore`** — a typealias for whichever backend the platform being compiled for
   has: `KeychainSecureStore`, `WindowsSecureStore`, `LinuxSecureStore`, or `HostSecureStore`.
   The package's premise is that callers never learn which platform they are on, yet every

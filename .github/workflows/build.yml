@@ -135,7 +135,9 @@ jobs:
   android:
     name: Build & Test (Android)
     needs: lint
-    runs-on: ubuntu-latest
+    # Pinned: the action downloads the Swift host toolchain for the runner's Ubuntu release, and
+    # swift.org publishes no 26.04 build, which is what `ubuntu-latest` has become.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 
