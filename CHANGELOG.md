@@ -7,7 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Fixes from the October 2026 audit. Finding IDs (`SS-n`) refer to that audit.
+## [0.3.0] - 2026-11-14
+
+Fixes from the October 2026 audit, and the Keychain accessibility option. Finding IDs (`SS-n`)
+refer to that audit.
 
 ### Added
 
