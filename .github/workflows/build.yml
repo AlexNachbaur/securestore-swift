@@ -30,6 +30,7 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     container: swift:6.3
     steps:
       - uses: actions/checkout@v7
@@ -39,6 +40,7 @@ jobs:
     name: Build & Test (Linux)
     needs: lint
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     container: swift:6.3
     env:
       # Keeps scratch keyring state on container-local storage rather than GitHub's
@@ -67,6 +69,7 @@ jobs:
     name: Build & Test (macOS)
     needs: lint
     runs-on: macos-26
+    timeout-minutes: 20
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
     steps:
@@ -102,6 +105,7 @@ jobs:
     name: Build (iOS Simulator)
     needs: lint
     runs-on: macos-26
+    timeout-minutes: 20
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
     steps:
@@ -116,6 +120,7 @@ jobs:
     name: Build & Test (Windows)
     needs: lint
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
@@ -138,6 +143,8 @@ jobs:
     # Pinned: the action downloads the Swift host toolchain for the runner's Ubuntu release, and
     # swift.org publishes no 26.04 build, which is what `ubuntu-latest` has become.
     runs-on: ubuntu-24.04
+    # A healthy run takes a few minutes; an emulator that never boots held a run for three hours.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
