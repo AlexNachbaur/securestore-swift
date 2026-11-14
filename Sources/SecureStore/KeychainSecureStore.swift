@@ -46,6 +46,55 @@
         return status
     }
 
+    /// When a Keychain item can be read, and whether it may leave the device that wrote it.
+    ///
+    /// Each case is one of Security Services' `kSecAttrAccessible*` classes. The two questions
+    /// are independent, which is why there are four:
+    ///
+    /// - *When* — after the first unlock since boot, or only while the device is unlocked. A
+    ///   process that runs while the device is locked, such as a background refresh or a
+    ///   notification service extension, can read only the first kind. Reading the second kind
+    ///   while locked throws ``SecureStoreError/platform(_:)`` carrying
+    ///   `errSecInteractionNotAllowed` (-25308).
+    /// - *Where* — the `ThisDeviceOnly` classes never migrate: a backup restored onto a
+    ///   different device, or a device-to-device transfer, does not carry the item. Use them for
+    ///   a credential bound to something that does not migrate either, such as a Secure Enclave
+    ///   key, where a copy on another device would be useless or misleading.
+    ///
+    /// The macOS file-based keychain records no class at all; see ``KeychainSecureStore`` for
+    /// what that means there.
+    public enum KeychainAccessibility: Sendable {
+        /// Readable after the first unlock since boot; migrates with backups and transfers.
+        ///
+        /// `kSecAttrAccessibleAfterFirstUnlock`, and the default.
+        case afterFirstUnlock
+
+        /// Readable after the first unlock since boot; never leaves this device.
+        ///
+        /// `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`.
+        case afterFirstUnlockThisDeviceOnly
+
+        /// Readable only while the device is unlocked; migrates with backups and transfers.
+        ///
+        /// `kSecAttrAccessibleWhenUnlocked`.
+        case whenUnlocked
+
+        /// Readable only while the device is unlocked; never leaves this device.
+        ///
+        /// `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`.
+        case whenUnlockedThisDeviceOnly
+
+        /// The `kSecAttrAccessible` value Security Services expects for this class.
+        var attributeValue: CFString {
+            switch self {
+            case .afterFirstUnlock: kSecAttrAccessibleAfterFirstUnlock
+            case .afterFirstUnlockThisDeviceOnly: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            case .whenUnlocked: kSecAttrAccessibleWhenUnlocked
+            case .whenUnlockedThisDeviceOnly: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+            }
+        }
+    }
+
     /// The backend `SecureStore` resolves to on this platform. See ``KeychainSecureStore``.
     ///
     /// Each backend file defines this under its own compile-time gate. The four gates are
@@ -57,9 +106,11 @@
     /// Items are `kSecClassGenericPassword`, keyed by service + account, which is the shape a
     /// token store wants: many named values under one service.
     ///
-    /// Accessibility is `kSecAttrAccessibleAfterFirstUnlock` so credentials remain readable
-    /// while the device is locked. That is required, not incidental — the notification service
-    /// extension performs delta sync from a locked device and needs its token.
+    /// Accessibility defaults to `kSecAttrAccessibleAfterFirstUnlock` so credentials remain
+    /// readable while the device is locked. That is required, not incidental — the notification
+    /// service extension performs delta sync from a locked device and needs its token. A
+    /// credential that must also never migrate to another device asks for
+    /// ``KeychainAccessibility/afterFirstUnlockThisDeviceOnly``; see ``accessibility``.
     ///
     /// ## macOS has two keychains, and only one honors `namespace`
     ///
@@ -76,9 +127,27 @@
     /// `keychain-access-groups`). An unsigned process — `swift run`, `swift test`, a plain
     /// command-line tool — has every write refused with `errSecMissingEntitlement` (-34018), and
     /// is shown an *empty* data protection keychain on every read.
+    ///
+    /// Because the file-based keychain records no accessibility class, ``accessibility`` has no
+    /// effect there: a `ThisDeviceOnly` class is accepted and silently not stored, so nothing
+    /// ties the item to this Mac. A macOS store that needs either guarantee — readable only
+    /// while unlocked, or never migrating — must also set ``usesDataProtectionKeychain``.
     public struct KeychainSecureStore: SecureStore {
 
         private let configuration: SecureStoreConfiguration
+
+        /// The class every write stores items with: when they can be read, and whether they may
+        /// migrate to another device. See ``KeychainAccessibility``.
+        ///
+        /// It is applied when an item is added *and* when an existing one is overwritten, so
+        /// changing it re-classes an item the next time that item is written; items not
+        /// written again keep the class they had. It is not part of the store's identity —
+        /// stores that differ only in accessibility read and write the same items, and the
+        /// last write decides the class.
+        ///
+        /// On macOS it takes effect only in the data protection keychain; see the type's
+        /// discussion.
+        public let accessibility: KeychainAccessibility
 
         /// Whether items live in the data protection keychain rather than the macOS
         /// file-based one.
@@ -107,10 +176,17 @@
         ///
         /// - Parameters:
         ///   - configuration: The service and namespace identifying the store.
+        ///   - accessibility: See ``accessibility``. Defaults to
+        ///     ``KeychainAccessibility/afterFirstUnlock``, readable while locked.
         ///   - usesDataProtectionKeychain: See ``usesDataProtectionKeychain``. Off by default,
         ///     because an unentitled macOS process cannot use that keychain at all.
-        public init(_ configuration: SecureStoreConfiguration, usesDataProtectionKeychain: Bool = false) {
+        public init(
+            _ configuration: SecureStoreConfiguration,
+            accessibility: KeychainAccessibility = .afterFirstUnlock,
+            usesDataProtectionKeychain: Bool = false
+        ) {
             self.configuration = configuration
+            self.accessibility = accessibility
             self.usesDataProtectionKeychain = usesDataProtectionKeychain
         }
 
@@ -123,11 +199,19 @@
         /// - Parameters:
         ///   - service: The keychain service attribute.
         ///   - namespace: The keychain access group, or `nil` for the process's default.
+        ///   - accessibility: See ``accessibility``. Defaults to
+        ///     ``KeychainAccessibility/afterFirstUnlock``, readable while locked.
         ///   - usesDataProtectionKeychain: See ``usesDataProtectionKeychain``. Off by default,
         ///     because an unentitled macOS process cannot use that keychain at all.
-        public init(service: String, namespace: String? = nil, usesDataProtectionKeychain: Bool = false) {
+        public init(
+            service: String,
+            namespace: String? = nil,
+            accessibility: KeychainAccessibility = .afterFirstUnlock,
+            usesDataProtectionKeychain: Bool = false
+        ) {
             self.init(
                 SecureStoreConfiguration(service: service, namespace: namespace),
+                accessibility: accessibility,
                 usesDataProtectionKeychain: usesDataProtectionKeychain
             )
         }
@@ -138,16 +222,12 @@
             // Try to add first and fall back to update on duplicate, rather than
             // read-then-branch: the check-then-act version can lose a race with another
             // process writing the same item, and both app and extensions share this store.
-            var attributes = baseQuery(for: key)
-            attributes[kSecValueData as String] = data
-            attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
-
+            let attributes = addAttributes(for: key, data: data)
             let query = baseQuery(for: key)
+            let changes = updateAttributes(data: data)
             let status = keychainUpsert(
                 add: { SecItemAdd(attributes as CFDictionary, nil) },
-                update: {
-                    SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
-                }
+                update: { SecItemUpdate(query as CFDictionary, changes as CFDictionary) }
             )
             guard status == errSecSuccess else {
                 throw keychainFailure(status, .set)
@@ -245,6 +325,31 @@
             var query = serviceQuery()
             query[kSecAttrAccount as String] = key
             return query
+        }
+
+        /// The full item `set` adds when `key` is not stored yet.
+        ///
+        /// Internal rather than private so the suite can assert the accessibility class on it:
+        /// an unentitled test process writes to the macOS file-based keychain, which records no
+        /// class, so the class cannot be observed through a real write there.
+        func addAttributes(for key: String, data: Data) -> [String: Any] {
+            var attributes = baseQuery(for: key)
+            attributes[kSecValueData as String] = data
+            attributes[kSecAttrAccessible as String] = accessibility.attributeValue
+            return attributes
+        }
+
+        /// The changes `set` applies when `key` is already stored.
+        ///
+        /// The class rides on the update as well as the add. Otherwise an item first written
+        /// with a migrating class would keep it through every later write by a store that asked
+        /// for `ThisDeviceOnly`, and the store's configuration would describe only items it
+        /// happened to create. Internal for the reason given on ``addAttributes(for:data:)``.
+        func updateAttributes(data: Data) -> [String: Any] {
+            [
+                kSecValueData as String: data,
+                kSecAttrAccessible as String: accessibility.attributeValue,
+            ]
         }
     }
 

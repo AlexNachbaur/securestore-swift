@@ -28,12 +28,14 @@ This package stores secrets; the following are in scope:
   unexpected on-disk location.
 - Memory-safety faults at the host bridge: a buffer read past its length, a use-after-free of a
   sink pointer, or a way for a host callback to corrupt Swift memory.
-- Weaker-than-documented protection on Apple — items not honouring
-  `kSecAttrAccessibleAfterFirstUnlock`, or ignoring the configured access group. One case is
-  documented rather than a vulnerability: the macOS file-based keychain, the default on macOS,
-  ignores both attributes by design of the platform. `KeychainSecureStore` enforces them on
-  macOS only when created with `usesDataProtectionKeychain: true`; a store created that way
-  which still leaked across namespaces would be in scope.
+- Weaker-than-documented protection on Apple — items not honouring the configured
+  accessibility class (`kSecAttrAccessibleAfterFirstUnlock` unless `accessibility:` names
+  another), or ignoring the configured access group. One case is documented rather than a
+  vulnerability: the macOS file-based keychain, the default on macOS, ignores both attributes
+  by design of the platform. `KeychainSecureStore` enforces them on macOS only when created with
+  `usesDataProtectionKeychain: true`; a store created that way which still leaked across
+  namespaces, or stored an item under a class other than the one it was given, would be in
+  scope.
 
 ## What the platform stores do and do not protect
 
@@ -56,9 +58,11 @@ choose what to store.
   or key. An account identifier in a key (`"session.<accountID>"`) is disclosed to that extent.
 - **Values are not wiped from memory.** A secret passes through `Data` on its way in and out,
   and neither this package nor Foundation zeroes those buffers on release.
-- **On Apple, items are stored with `kSecAttrAccessibleAfterFirstUnlock`**, so they are
-  readable while the device is locked after its first unlock, and are included in encrypted
-  backups.
+- **On Apple, items are stored with `kSecAttrAccessibleAfterFirstUnlock` by default**, so they
+  are readable while the device is locked after its first unlock, and are included in encrypted
+  backups, which can restore them onto another device. A store created with a `ThisDeviceOnly`
+  `accessibility:` keeps its items from migrating — on macOS only together with
+  `usesDataProtectionKeychain: true`.
 
 ## Not in scope
 
